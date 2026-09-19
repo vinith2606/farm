@@ -1,0 +1,143 @@
+@import "leaflet/dist/leaflet.css";
+@import "tailwindcss";
+
+@theme {
+  /* Professional dark-first palette */
+  --color-background: #000000;
+  --color-surface: #080808;
+  --color-surface-elevated: #111111;
+  --color-surface-hover: #1A1A1A;
+  --color-foreground: #FFFFFF;
+  --color-muted: #C5C5C5;
+  --color-subtle: #8D8D8D;
+  --color-border: #2A2A2A;
+  --color-border-light: #444444;
+
+  --color-primary: #8AF0AE;
+  --color-primary-light: #B7F7C9;
+  --color-primary-dark: #55D98A;
+  --color-accent: #FBBF24;
+  --color-earth: #D4A574;
+  --color-blue: #60A5FA;
+  --color-danger: #F87171;
+
+  --font-display: 'Poppins', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --radius-card: 20px;
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.35);
+  --shadow-float: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+html,
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  background: var(--color-background);
+  color: var(--color-foreground);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  color: var(--color-foreground);
+}
+
+.glass {
+  background: rgba(8, 8, 8, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(138, 240, 174, 0.28);
+}
+
+.neu-soft {
+  background: var(--color-surface);
+  box-shadow: 8px 8px 16px rgba(0, 0, 0, 0.3), -2px -2px 8px rgba(255, 255, 255, 0.02);
+}
+
+.gradient-primary {
+  background: linear-gradient(135deg, #2E9B5B 0%, #55D98A 52%, #B7F7C9 100%);
+}
+
+.gradient-hero {
+  background: linear-gradient(135deg, #000000 0%, #000000 62%, #07150B 100%);
+}
+
+.gradient-accent {
+  background: linear-gradient(135deg, #D97706 0%, #FBBF24 100%);
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--color-background); }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-light); }
+
+.ripple { position: relative; overflow: hidden; }
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #111111 25%, #242424 50%, #111111 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.map-pattern {
+  background-color: #000000;
+  background-image:
+    radial-gradient(circle at 25% 25%, rgba(52, 211, 153, 0.08) 0%, transparent 50%),
+    linear-gradient(rgba(48, 61, 51, 0.35) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(48, 61, 51, 0.35) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+}
+
+/* Light mode override (optional toggle) */
+html.light {
+  color-scheme: light;
+  --color-background: #F7FFF9;
+  --color-surface: #FFFFFF;
+  --color-surface-elevated: #EAF7EE;
+  --color-surface-hover: #D8EFDF;
+  --color-foreground: #102218;
+  --color-muted: #4D6756;
+  --color-subtle: #75907D;
+  --color-border: #C5E0CC;
+  --color-border-light: #A8CCB2;
+  --color-primary: #168A4A;
+  --color-primary-light: #1B9952;
+  --color-primary-dark: #0D6B38;
+  --shadow-card: 0 4px 24px rgba(16, 75, 37, 0.1);
+}
+
+html.light body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+}
+
+html.light .glass {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+html.light .map-pattern {
+  background-color: #E5F5E9;
+  background-image:
+    radial-gradient(circle at 25% 25%, rgba(22, 138, 74, 0.14) 0%, transparent 50%),
+    linear-gradient(rgba(22, 138, 74, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22, 138, 74, 0.1) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+}
+
+html.light .skeleton {
+  background: linear-gradient(90deg, #E2E8F0 25%, #F1F5F9 50%, #E2E8F0 75%);
+  background-size: 200% 100%;
+}
