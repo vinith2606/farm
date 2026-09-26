@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2, Clock3, MapPin, Package, Truck, XCircle } from 'lucide-react'
+import { ArrowLeft, Bike, CheckCircle2, Clock3, MapPin, Package, Truck, XCircle } from 'lucide-react'
 import { useAuth } from '@/context/AppContext'
 import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
@@ -9,7 +9,6 @@ import { EmptyState } from '@/components/ui/Modal'
 import { OrderCard } from '@/components/cards/OrderCard'
 import api from '@/services/api'
 import { normalizeOrders } from '@/utils/orderService'
-import ReviewForm from '@/components/common/ReviewForm'
 
 const filters: Record<string, { title: string; description: string; statuses: string[]; icon: typeof Clock3 }> = {
   pending: { title: 'New orders', description: 'Accept an order to send it to delivery partners, or reject it.', statuses: ['pending'], icon: Clock3 },
@@ -83,11 +82,34 @@ export default function FarmerOrderStatus() {
                 <div className="flex flex-col justify-between gap-4 rounded-2xl bg-surface-elevated p-4">
                   <div><p className="text-xs uppercase tracking-wide text-muted">Current status</p><Badge variant={order.status === 'cancelled' ? 'danger' : order.status === 'completed' || order.status === 'delivered' ? 'success' : 'pending'}>{order.status.replace(/_/g, ' ')}</Badge></div>
                   {order.deliveryAgentName && <p className="text-sm"><span className="text-muted">Delivery partner:</span> {order.deliveryAgentName}</p>}
+                  {['accepted', 'pickup', 'out_for_delivery'].includes(order.status) && (
+                    <div className="mt-3 overflow-hidden rounded-2xl border border-primary/20 bg-primary/5 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
+                            <Bike className="h-5 w-5 animate-bounce" />
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium text-foreground">Pickup rider is on the way</p>
+                            <p className="text-xs text-muted">
+                              {order.status === 'accepted' && 'Waiting for the agent to reach your pickup point.'}
+                              {order.status === 'pickup' && 'The agent has reached your farm and is picking up the order.'}
+                              {order.status === 'out_for_delivery' && 'The order has left your farm and is on the route.'}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="h-2.5 w-2.5 rounded-full bg-primary animate-pulse" />
+                      </div>
+                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-border">
+                        <div className="h-full w-2/3 rounded-full bg-primary/80 animate-pulse" />
+                      </div>
+                    </div>
+                  )}
                   {order.status === 'pending' && <div className="flex gap-2"><Button className="flex-1" loading={updating === order.id} onClick={() => updateStatus(order.id, 'accepted')}>Accept</Button><Button variant="danger" className="flex-1" loading={updating === order.id} onClick={() => updateStatus(order.id, 'cancelled')}>Reject</Button></div>}
-                  {order.status === 'accepted' && <p className="text-sm text-blue">Waiting for a delivery partner to accept this order.</p>}
+                  {order.status === 'accepted' && !['accepted', 'pickup', 'out_for_delivery'].includes(order.status) && <p className="text-sm text-blue">Waiting for a delivery partner to accept this order.</p>}
                   {order.status === 'pickup' && <p className="text-sm text-accent">Delivery partner has accepted the pickup.</p>}
                   {order.status === 'out_for_delivery' && <p className="text-sm text-primary">Order is out for delivery.</p>}
-                  {(order.status === 'completed' || order.status === 'delivered') && <div className="space-y-4"><p className="text-sm text-primary">Order completed successfully.</p>{order.deliveryAgentId && <ReviewForm targetType="delivery" targetId={order.deliveryAgentId} orderId={order.id} reviewerId={userId || ''} reviewerName={localStorage.getItem('farmdirect_user') || 'Farmer'} reviewerRole="farmer" title={`Rate ${order.deliveryAgentName || 'the delivery partner'}`} />}</div>}
+                  {(order.status === 'completed' || order.status === 'delivered') && <p className="text-sm text-primary">Order completed successfully.</p>}
                   {order.status === 'cancelled' && <p className="text-sm text-danger">This order was cancelled.</p>}
                 </div>
               </div>

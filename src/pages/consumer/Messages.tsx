@@ -73,8 +73,11 @@ export default function ConsumerMessages() {
     const socket = initSocket(userId)
     socket.on('new_message', (msg: any) => {
       if (String(msg.receiver_id) === String(userId) || String(msg.sender_id) === String(userId)) {
-        if (activeContact && String(msg.sender_id) === activeContact.id) {
-          setMessages((prev) => [msg, ...prev])
+        if (activeContact && (String(msg.sender_id) === activeContact.id || String(msg.receiver_id) === activeContact.id)) {
+          setMessages((prev) => {
+            const next = [...prev, msg]
+            return next.sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+          })
         }
       }
     })
@@ -86,6 +89,11 @@ export default function ConsumerMessages() {
   useEffect(() => {
     if (activeId) fetchMessages(activeId)
   }, [activeId])
+
+  const orderedMessages = useMemo(
+    () => [...messages].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()),
+    [messages]
+  )
 
   return (
     <div className="space-y-4">
@@ -136,10 +144,10 @@ export default function ConsumerMessages() {
                 <a href={activeContact.phone ? `tel:${activeContact.phone}` : undefined} className={cn('inline-flex items-center justify-center gap-2 rounded-xl border-2 border-primary px-3 py-1.5 text-sm font-medium text-primary', activeContact.phone ? 'hover:bg-primary/10' : 'pointer-events-none opacity-50')} aria-label={`Call ${activeContact.name}`}><Phone className="w-4 h-4" /> {t('common.call')}</a>
               </div>
               <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-background/50">
-                {messages.length === 0 ? (
+                {orderedMessages.length === 0 ? (
                   <p className="text-center text-muted text-sm py-8">No messages yet.</p>
                 ) : (
-                  messages.map((msg) => (
+                  orderedMessages.map((msg) => (
                     <div key={msg.id} className={cn('flex', String(msg.sender_id) === String(userId) ? 'justify-end' : 'justify-start')}>
                       <div className="max-w-[70%] px-4 py-2 rounded-2xl bg-surface-elevated text-sm text-foreground">
                         {msg.content}

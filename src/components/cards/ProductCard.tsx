@@ -18,14 +18,22 @@ interface ProductCardProps {
 
 export function ProductCard({ product, linkPrefix = '/consumer/product', onAddToCart }: ProductCardProps) {
   const { t } = useTranslation()
-  const { addItem } = useCart()
+  const { addItem, wishlist, toggleWishlist } = useCart()
   const { toast } = useToast()
+  const isLiked = wishlist.some((item) => item.id === product.id)
 
   const handleAdd = (e: React.MouseEvent) => {
     e.preventDefault()
     addItem(product)
     toast(t('toast.addedToCart'), 'success')
     onAddToCart?.()
+  }
+
+  const handleWishlist = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    toggleWishlist(product)
+    toast(isLiked ? 'Removed from wishlist.' : 'Added to wishlist.', 'success')
   }
 
   return (
@@ -44,8 +52,8 @@ export function ProductCard({ product, linkPrefix = '/consumer/product', onAddTo
               <Badge variant="verified">✓ {t('common.verified')}</Badge>
             </div>
           )}
-          <button type="button" className="absolute top-3 right-3 p-2 rounded-full glass opacity-0 group-hover:opacity-100 transition-opacity">
-            <Heart className="w-4 h-4 text-muted" />
+          <button type="button" onClick={handleWishlist} className="absolute top-3 right-3 p-2 rounded-full glass opacity-0 group-hover:opacity-100 transition-opacity">
+            <Heart className={`w-4 h-4 ${isLiked ? 'text-foreground' : 'text-muted'}`} />
           </button>
           <div className="absolute bottom-3 right-3">
             <AvailabilityBadge available={product.available} />

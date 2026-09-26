@@ -29,8 +29,6 @@ export default function FarmerAnalytics() {
 
   const availableCrops = Array.from(new Set([...cropOptions, ...products]))
 
-  const maxPrice = prediction?.history.length ? Math.max(...prediction.history.map((point) => point.price)) : 1
-
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold font-[family-name:var(--font-display)]">{t('nav.analytics')}</h1>
@@ -62,26 +60,9 @@ export default function FarmerAnalytics() {
               <p className="font-semibold">{prediction ? formatCurrency(prediction.currentPrice) : '—'} / kg</p>
             </div>
             <div className="rounded-2xl bg-surface-elevated p-3">
-              <p className="text-muted">{t('farmer.marketTrends')}</p>
+              <p className="text-muted">{t('common.change')}</p>
               <p className="font-semibold">{prediction ? `${prediction.change >= 0 ? '+' : ''}${prediction.change}%` : '—'}</p>
             </div>
-          </div>
-        </Card>
-
-        <Card>
-          <h2 className="font-semibold mb-4">{t('farmer.marketTrends')}</h2>
-          <div className="h-72 flex items-end justify-between gap-2 overflow-x-auto pb-1">
-            {(prediction?.history || []).map((point) => (
-              <div key={point.month} className="flex min-w-[36px] flex-1 flex-col items-center gap-2">
-                <div className="flex h-52 w-full items-end justify-center">
-                  <div
-                    className="w-full rounded-t-2xl bg-primary/70"
-                    style={{ height: `${Math.max((point.price / maxPrice) * 100, 12)}%` }}
-                  />
-                </div>
-                <span className="text-[11px] text-muted">{point.month}</span>
-              </div>
-            ))}
           </div>
         </Card>
       </div>

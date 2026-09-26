@@ -21,6 +21,8 @@ interface FarmerProfileData {
   description?: string
   avatar?: string
   certificateStatus?: 'verified' | 'pending' | 'rejected' | 'expired'
+  rating?: number
+  reviewCount?: number
   created_at?: string
 }
 
@@ -40,7 +42,19 @@ export default function FarmerProfileView() {
       setError('')
       try {
         const response = await api.get(`/users/${id}`)
-        setFarmer(response.data.user)
+        const farmerResponse = response.data.user || {}
+        const reviewsResponse = await api.get('/reviews', { params: { targetType: 'farmer', targetId: id } })
+        const reviews = reviewsResponse.data.reviews || []
+        const derivedRating = reviews.length
+          ? reviews.reduce((sum: number, review: any) => sum + Number(review.rating || 0), 0) / reviews.length
+          : Number(farmerResponse.rating ?? 0)
+
+        setFarmer({
+          ...farmerResponse,
+          rating: derivedRating || Number(farmerResponse.rating ?? 0),
+          reviewCount: Number(farmerResponse.reviewCount ?? reviews.length ?? 0),
+        })
+
         const productsResponse = await api.get(`/products/farmer/${id}`)
         setProducts(normalizeProducts(productsResponse.data.products || []))
       } catch (err) {
@@ -75,17 +89,18 @@ export default function FarmerProfileView() {
   }
 
   const location = farmer.city ? `${farmer.city}, India` : farmer.address || 'Location unavailable'
-  const averageRating = products.length ? products.reduce((sum, product) => sum + product.rating, 0) / products.length : 0
+  const averageRating = Number(farmer.rating ?? 0)
   const certificateVariant = farmer.certificateStatus === 'verified' ? 'verified' : farmer.certificateStatus === 'rejected' ? 'danger' : 'pending'
+  const certificateLabel = farmer.certificateStatus === 'verified' ? t('common.verified') : farmer.certificateStatus === 'rejected' ? 'Rejected' : farmer.certificateStatus === 'expired' ? 'Expired' : 'Not uploaded'
 
   return (
     <div className="space-y-6 max-w-2xl">
       <Link to="/consumer/search" className="text-sm text-primary hover:underline">← {t('common.back')}</Link>
-      <h1 className="flex items-center gap-2 text-2xl font-bold font-[family-name:var(--font-display)]">{farmer.name}{farmer.certificateStatus === 'verified' ? <span className="inline-flex" aria-label={t('common.verified')} title={t('common.verified')}><CheckCircle2 className="h-5 w-5 text-primary" /></span> : <span className="inline-flex" aria-label={t('farmer.kanban.pending')} title={t('farmer.kanban.pending')}><XCircle className="h-5 w-5 text-accent" /></span>}</h1>
+      <h1 className="flex items-center gap-2 text-2xl font-bold font-[family-name:var(--font-display)]">{farmer.name}{farmer.certificateStatus === 'verified' ? <span className="inline-flex" aria-label={t('common.verified')} title={t('common.verified')}><CheckCircle2 className="h-5 w-5 text-primary" /></span> : <span className="inline-flex" aria-label={certificateLabel} title={certificateLabel}><XCircle className="h-5 w-5 text-accent" /></span>}</h1>
       <Card className="text-center !p-8">
         {farmer.avatar ? <img src={farmer.avatar} alt={farmer.name} className="w-24 h-24 rounded-full object-cover mx-auto mb-4" /> : <div className="w-24 h-24 rounded-full gradient-primary flex items-center justify-center text-white text-3xl font-bold mx-auto mb-4">{farmer.name.charAt(0)}</div>}
         <h2 className="flex items-center justify-center gap-2 text-xl font-semibold">{farmer.name}{farmer.certificateStatus === 'verified' ? <CheckCircle2 className="h-4 w-4 text-primary" /> : <XCircle className="h-4 w-4 text-accent" />}</h2>
-        <Badge variant={certificateVariant} className="mt-2">{farmer.certificateStatus === 'verified' ? t('common.verified') : t('farmer.kanban.pending')}</Badge>
+        <Badge variant={certificateVariant} className="mt-2">{certificateLabel}</Badge>
         <div className="flex items-center justify-center gap-1 mt-2">
           <Star className="w-4 h-4 fill-accent text-accent" />
           <span className="font-medium">{averageRating ? averageRating.toFixed(1) : '—'}</span>

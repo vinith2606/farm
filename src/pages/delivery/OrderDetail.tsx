@@ -1,5 +1,5 @@
 import { useEffect, useState, type ChangeEvent } from 'react'
-import { ArrowLeft, Camera, CheckCircle2, MapPin, MessageCircle, Navigation, Package, Phone, Truck } from 'lucide-react'
+import { ArrowLeft, Bike, Camera, CheckCircle2, MapPin, MessageCircle, Navigation, Package, Phone, Truck } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
@@ -18,6 +18,46 @@ function statusVariant(status: string) {
   if (status === 'completed' || status === 'delivered') return 'success' as const
   if (status === 'accepted' || status === 'pickup') return 'verified' as const
   return 'pending' as const
+}
+
+function ActiveStatusCard({ status }: { status: string }) {
+  const titleMap: Record<string, string> = {
+    accepted: 'Pickup request accepted',
+    pickup: 'Rider en route for pickup',
+    out_for_delivery: 'Order is out for delivery',
+  }
+
+  const messageMap: Record<string, string> = {
+    accepted: 'You have accepted the delivery and are heading to collect the order.',
+    pickup: 'The parcel is being picked up from the farmer and loaded for delivery.',
+    out_for_delivery: 'The order is moving toward the customer and is now in transit.',
+  }
+
+  const progressMap: Record<string, string> = {
+    accepted: 'w-1/3',
+    pickup: 'w-2/3',
+    out_for_delivery: 'w-full',
+  }
+
+  return (
+    <Card className="border border-primary/20 bg-primary/5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="status-delivery-orb relative flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+            <Bike className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-foreground">{titleMap[status] || 'Order in progress'}</p>
+            <p className="text-xs text-muted">{messageMap[status] || 'Your order is moving forward.'}</p>
+          </div>
+        </div>
+        <span className="h-2.5 w-2.5 rounded-full bg-primary animate-pulse" />
+      </div>
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-border">
+        <div className={`status-progress-bar h-full rounded-full bg-primary ${progressMap[status] || 'w-1/3'}`} />
+      </div>
+    </Card>
+  )
 }
 
 export default function DeliveryOrderDetail() {
@@ -91,6 +131,7 @@ export default function DeliveryOrderDetail() {
     <div className="mx-auto max-w-4xl space-y-6">
       <div className="flex items-center justify-between gap-3"><Button variant="ghost" size="icon" onClick={() => navigate('/delivery/orders')} aria-label="Back to delivery orders"><ArrowLeft className="h-5 w-5" /></Button><div className="mr-auto"><p className="text-sm text-muted">Delivery order</p><h1 className="text-2xl font-bold font-[family-name:var(--font-display)]">Order #{order.id}</h1></div><Badge variant={statusVariant(order.status)}>{order.status.replace(/_/g, ' ')}</Badge></div>
       <Card padding="none" className="overflow-hidden"><div className="grid grid-cols-2 border-b border-border"><button type="button" onClick={() => setTab('pickup')} className={`flex items-center justify-center gap-2 border-b-2 px-4 py-4 text-sm font-semibold ${isPickup ? 'border-primary text-primary' : 'border-transparent text-muted'}`}><MapPin className="h-4 w-4" /> Pickup</button><button type="button" onClick={() => setTab('delivery')} className={`flex items-center justify-center gap-2 border-b-2 px-4 py-4 text-sm font-semibold ${!isPickup ? 'border-primary text-primary' : 'border-transparent text-muted'}`}><Truck className="h-4 w-4" /> Delivery</button></div><div className="p-5"><LocationPanel title={isPickup ? 'Pickup details' : 'Delivery details'} name={isPickup ? order.farmerName : order.consumerName} phone={isPickup ? order.farmerPhone : order.consumerPhone} address={isPickup ? order.pickupAddress : order.deliveryAddress} contactId={isPickup ? order.farmerId : order.consumerId} navigationUrl={navigationUrl} mapPath={mapPath} navigationLabel={isPickup ? 'Navigate to pickup' : 'Navigate to delivery'} /></div></Card>
+      {(order.status === 'accepted' || order.status === 'pickup' || order.status === 'out_for_delivery') && <ActiveStatusCard status={order.status} />}
       <Card><div className="mb-4 flex items-center gap-2"><Package className="h-5 w-5 text-primary" /><h2 className="font-semibold">Order items</h2></div><div className="space-y-3">{order.items.map((item) => <div key={item.productId} className="flex items-center justify-between border-b border-border pb-3 last:border-0 last:pb-0"><div><p className="font-medium">{item.productName}</p><p className="text-sm text-muted">{order.farmerName}</p></div><span className="font-semibold">Quantity: {item.quantity}</span></div>)}</div></Card>
       {(order.pickupParcelPhoto || order.deliveryParcelPhoto) && <Card><h2 className="mb-4 font-semibold">Parcel photos</h2><div className="grid gap-4 sm:grid-cols-2">{order.pickupParcelPhoto && <div><p className="mb-2 text-sm text-muted">Pickup photo</p><img src={order.pickupParcelPhoto} alt="Parcel at pickup" className="max-h-64 w-full rounded-2xl object-cover" /></div>}{order.deliveryParcelPhoto && <div><p className="mb-2 text-sm text-muted">Delivery photo</p><img src={order.deliveryParcelPhoto} alt="Parcel at delivery" className="max-h-64 w-full rounded-2xl object-cover" /></div>}</div></Card>}
       {(order.status === 'accepted' || order.status === 'pickup' || order.status === 'out_for_delivery') && <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-dashed border-primary/40 bg-primary/5 p-4 text-sm"><Camera className="h-5 w-5 text-primary" /><span>{parcelPhoto ? 'Parcel photo selected' : `Add ${order.status === 'out_for_delivery' ? 'delivery' : 'pickup'} parcel photo (optional)`}</span><input type="file" accept="image/*" className="sr-only" onChange={handleParcelPhoto} /></label>}

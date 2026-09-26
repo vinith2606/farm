@@ -155,6 +155,8 @@ const initializeDatabase = async () => {
             description TEXT,
             avatar TEXT,
             certificate_status TEXT DEFAULT 'pending',
+            rating REAL DEFAULT 0,
+            review_count INTEGER DEFAULT 0,
             driving_license_number TEXT,
             vehicle_type TEXT,
             vehicle_number TEXT,
@@ -246,13 +248,17 @@ const initializeDatabase = async () => {
 
           CREATE TABLE IF NOT EXISTS reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL DEFAULT 0,
+            target_type TEXT NOT NULL DEFAULT 'product',
+            target_id INTEGER NOT NULL DEFAULT 0,
+            order_id INTEGER NOT NULL DEFAULT 0,
             user_id INTEGER NOT NULL,
             user_name TEXT NOT NULL,
             rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
             comment TEXT NOT NULL,
+            review_image TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(product_id, user_id),
+            UNIQUE(target_type, target_id, order_id, user_id),
             FOREIGN KEY (product_id) REFERENCES products(id),
             FOREIGN KEY (user_id) REFERENCES users(id)
           );
@@ -321,6 +327,12 @@ const initializeDatabase = async () => {
   if (!existing.includes('certificate_status')) {
     await run("ALTER TABLE users ADD COLUMN certificate_status TEXT DEFAULT 'pending'")
   }
+  if (!existing.includes('rating')) {
+    await run('ALTER TABLE users ADD COLUMN rating REAL DEFAULT 0')
+  }
+  if (!existing.includes('review_count')) {
+    await run('ALTER TABLE users ADD COLUMN review_count INTEGER DEFAULT 0')
+  }
   if (!existing.includes('driving_license_number')) {
     await run('ALTER TABLE users ADD COLUMN driving_license_number TEXT')
   }
@@ -368,7 +380,55 @@ const initializeDatabase = async () => {
   if (!existingReviewColumns.includes('target_type')) await run("ALTER TABLE reviews ADD COLUMN target_type TEXT DEFAULT 'product'")
   if (!existingReviewColumns.includes('target_id')) await run('ALTER TABLE reviews ADD COLUMN target_id INTEGER')
   if (!existingReviewColumns.includes('order_id')) await run('ALTER TABLE reviews ADD COLUMN order_id INTEGER')
-  await run("UPDATE reviews SET target_type = 'product', target_id = product_id WHERE target_type IS NULL OR target_id IS NULL")
+  if (!existingReviewColumns.includes('review_image')) await run('ALTER TABLE reviews ADD COLUMN review_image TEXT')
+  await run("UPDATE reviews SET target_type = 'product', target_id = product_id, order_id = 0 WHERE target_type IS NULL OR target_id IS NULL OR order_id IS NULL")
+
+  const reviewIndexes = await all("PRAGMA index_list('reviews')")
+  const legacyUniqueIndex = reviewIndexes.find((indexInfo) => indexInfo.unique && indexInfo.origin === 'u')
+  if (legacyUniqueIndex) {
+    const legacyColumns = await all(`PRAGMA index_info('${legacyUniqueIndex.name}')`)
+    const legacyColumnNames = legacyColumns.map((column) => column.name)
+    const isLegacyProductUserConstraint = legacyColumnNames.includes('product_id') && legacyColumnNames.includes('user_id') && !legacyColumnNames.includes('target_type')
+    if (isLegacyProductUserConstraint) {
+      const existingRows = await all('SELECT * FROM reviews')
+      await run('ALTER TABLE reviews RENAME TO reviews_legacy')
+      await run(`CREATE TABLE reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL DEFAULT 0,
+        target_type TEXT NOT NULL DEFAULT 'product',
+        target_id INTEGER NOT NULL DEFAULT 0,
+        order_id INTEGER NOT NULL DEFAULT 0,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+        comment TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(target_type, target_id, order_id, user_id),
+        FOREIGN KEY (product_id) REFERENCES products(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      )`)
+      for (const review of existingRows) {
+        await run(
+          'INSERT INTO reviews (id, product_id, target_type, target_id, order_id, user_id, user_name, rating, comment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [review.id, review.product_id ?? 0, review.target_type || 'product', review.target_id ?? review.product_id ?? 0, review.order_id ?? 0, review.user_id, review.user_name, review.rating, review.comment, review.created_at]
+        )
+      }
+      await run('DROP TABLE reviews_legacy')
+    }
+  }
+
+  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_target_order_user ON reviews (target_type, target_id, order_id, user_id)')
+
+  const farmerRatingRows = await all("SELECT target_id AS user_id, COUNT(*) AS review_count, AVG(rating) AS average_rating FROM reviews WHERE target_type = 'farmer' GROUP BY target_id")
+  for (const row of farmerRatingRows) {
+    await run('UPDATE users SET rating = ?, review_count = ? WHERE id = ? AND role = ?', [Number(row.average_rating || 0), Number(row.review_count || 0), row.user_id, 'farmer'])
+  }
+
+  const deliveryRatingRows = await all("SELECT target_id AS user_id, COUNT(*) AS review_count, AVG(rating) AS average_rating FROM reviews WHERE target_type = 'delivery' GROUP BY target_id")
+  for (const row of deliveryRatingRows) {
+    await run('UPDATE users SET rating = ?, review_count = ? WHERE id = ? AND role = ?', [Number(row.average_rating || 0), Number(row.review_count || 0), row.user_id, 'delivery'])
+  }
+
   const certificateColumns = await all('PRAGMA table_info(certificates)')
   if (!certificateColumns.some((column) => column.name === 'certificate_number')) await run('ALTER TABLE certificates ADD COLUMN certificate_number TEXT')
   if (!certificateColumns.some((column) => column.name === 'document_blob')) await run('ALTER TABLE certificates ADD COLUMN document_blob BLOB')
@@ -444,6 +504,8 @@ const getSafeUser = (user) => ({
   state: user.state,
   pincode: user.pincode,
   certificateStatus: user.certificate_review_status ?? user.certificate_status ?? user.certificateStatus ?? 'pending',
+  rating: Number(user.rating ?? 0),
+  reviewCount: Number(user.review_count ?? 0),
   drivingLicenseNumber: user.driving_license_number ?? user.drivingLicenseNumber,
   vehicleType: user.vehicle_type ?? user.vehicleType,
   vehicleNumber: user.vehicle_number ?? user.vehicleNumber,
@@ -529,7 +591,7 @@ app.post('/api/auth/register', async (req, res) => {
       [role, name.trim(), email.trim().toLowerCase(), phone?.trim() || '', hashPassword(password), lat || null, lng || null, address || null, city || null]
     )
 
-    const createdUser = await get('SELECT id, role, name, email, phone, lat, lng, address, city, farm_name, description, avatar, certificate_status, created_at FROM users WHERE id = ?', [insertResult.id])
+    const createdUser = await get('SELECT id, role, name, email, phone, lat, lng, address, city, farm_name, description, avatar, certificate_status, rating, review_count, created_at FROM users WHERE id = ?', [insertResult.id])
 
     return res.status(201).json({
       message: 'Account created successfully.',
@@ -555,7 +617,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const user = await get(
-      'SELECT id, role, name, email, phone, password, lat, lng, address, city, farm_name, description, avatar, certificate_status, created_at FROM users WHERE role = ? AND email = ?',
+      'SELECT id, role, name, email, phone, password, lat, lng, address, city, farm_name, description, avatar, certificate_status, rating, review_count, created_at FROM users WHERE role = ? AND email = ?',
       [role, String(email).trim().toLowerCase()]
     )
 
@@ -581,7 +643,7 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/admin/users', async (req, res) => {
   try {
     const users = await all(
-            `SELECT u.id, u.role, u.name, u.email, u.phone, u.lat, u.lng, u.address, u.city, u.farm_name, u.description, u.avatar, u.certificate_status, u.account_status,
+            `SELECT u.id, u.role, u.name, u.email, u.phone, u.lat, u.lng, u.address, u.city, u.farm_name, u.description, u.avatar, u.certificate_status, u.rating, u.review_count, u.account_status,
               u.aadhaar_number, u.aadhaar_status, u.driving_license_status, u.availability_status,
               u.driving_license_number, u.vehicle_type, u.vehicle_number, u.created_at,
               c.id AS certificate_id, c.type AS certificate_type, c.certificate_number, c.document_url AS certificate_document_url,
@@ -739,11 +801,18 @@ app.get('/api/reviews', async (req, res) => {
 
 app.post('/api/reviews', async (req, res) => {
   try {
-    const { product_id, target_type = 'product', target_id, order_id, reviewer_role = 'consumer', user_id, user_name, rating, comment } = req.body || {}
+    const { product_id, target_type = 'product', target_id, order_id, reviewer_role = 'consumer', user_id, user_name, rating, comment, image_url } = req.body || {}
     const targetId = Number(target_id ?? product_id)
+    const normalizedOrderId = Number(order_id ?? 0)
     const numericRating = Number(rating)
-    if (!['product', 'farmer', 'delivery'].includes(target_type) || !targetId || !user_id || !user_name || !Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5 || !comment?.trim()) {
-      return res.status(400).json({ message: 'Review target, user, rating, and review text are required.' })
+    const reviewImage = typeof image_url === 'string' ? image_url.trim() : ''
+    const sanitizedComment = typeof comment === 'string' ? comment.trim() : ''
+
+    if (!['product', 'farmer', 'delivery'].includes(target_type) || !targetId || !user_id || !user_name || !Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5) {
+      return res.status(400).json({ message: 'Review target, user, and rating are required.' })
+    }
+    if (target_type !== 'product' && !sanitizedComment) {
+      return res.status(400).json({ message: 'Review text is required for farmer and delivery partner ratings.' })
     }
 
     if (target_type === 'product') {
@@ -762,17 +831,21 @@ app.post('/api/reviews', async (req, res) => {
 
     const existing = target_type === 'product'
       ? await get("SELECT id FROM reviews WHERE target_type = 'product' AND target_id = ? AND user_id = ?", [targetId, user_id])
-      : await get('SELECT id FROM reviews WHERE target_type = ? AND target_id = ? AND order_id = ? AND user_id = ?', [target_type, targetId, order_id, user_id])
+      : await get('SELECT id FROM reviews WHERE target_type = ? AND target_id = ? AND order_id = ? AND user_id = ?', [target_type, targetId, normalizedOrderId, user_id])
     if (existing) return res.status(409).json({ message: 'You have already submitted this review.' })
 
+    const finalComment = target_type === 'product' ? (sanitizedComment || 'Product review') : sanitizedComment
     const result = await run(
-      'INSERT INTO reviews (product_id, target_type, target_id, order_id, user_id, user_name, rating, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [target_type === 'product' ? targetId : 0, target_type, targetId, order_id || null, user_id, user_name.trim(), numericRating, comment.trim()]
+      'INSERT INTO reviews (product_id, target_type, target_id, order_id, user_id, user_name, rating, comment, review_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [target_type === 'product' ? targetId : 0, target_type, targetId, target_type === 'product' ? 0 : normalizedOrderId, user_id, user_name.trim(), numericRating, finalComment, reviewImage || null]
     )
     const review = await get('SELECT * FROM reviews WHERE id = ?', [result.id])
     if (target_type === 'product') {
       const aggregate = await get("SELECT COUNT(*) AS count, AVG(rating) AS average FROM reviews WHERE target_type = 'product' AND target_id = ?", [targetId])
       await run('UPDATE products SET rating = ?, review_count = ? WHERE id = ?', [aggregate.average || 0, aggregate.count || 0, targetId])
+    } else if (['farmer', 'delivery'].includes(target_type)) {
+      const aggregate = await get("SELECT COUNT(*) AS count, AVG(rating) AS average FROM reviews WHERE target_type = ? AND target_id = ?", [target_type, targetId])
+      await run('UPDATE users SET rating = ?, review_count = ? WHERE id = ? AND role = ?', [aggregate.average || 0, aggregate.count || 0, targetId, target_type])
     }
     res.status(201).json({ message: 'Review submitted successfully.', review })
   } catch (error) {
@@ -785,7 +858,7 @@ app.get('/api/users/:id', async (req, res) => {
   try {
     const { id } = req.params
     const user = await get(
-      'SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, created_at FROM users WHERE id = ?',
+      'SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, rating, review_count, created_at FROM users WHERE id = ?',
       [id]
     )
 
@@ -857,7 +930,7 @@ app.put('/api/users/:id/profile', async (req, res) => {
     }
 
     const user = await get(
-      'SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, account_status, aadhaar_number, aadhaar_status, driving_license_status, availability_status, driving_license_number, vehicle_type, vehicle_number, created_at FROM users WHERE id = ?',
+      'SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, rating, review_count, account_status, aadhaar_number, aadhaar_status, driving_license_status, availability_status, driving_license_number, vehicle_type, vehicle_number, created_at FROM users WHERE id = ?',
       [id]
     )
     if (!user) return res.status(404).json({ message: 'User not found.' })

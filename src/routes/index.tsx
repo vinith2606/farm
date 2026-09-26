@@ -22,6 +22,7 @@ import ConsumerHome from '@/pages/consumer/Home'
 import ConsumerSearch from '@/pages/consumer/Search'
 import ConsumerMap from '@/pages/consumer/Map'
 import ConsumerCart from '@/pages/consumer/Cart'
+import ConsumerWishlist from '@/pages/consumer/Wishlist'
 import ConsumerOrders from '@/pages/consumer/Orders'
 import ConsumerOrderDetail from '@/pages/consumer/OrderDetail'
 import ConsumerMessages from '@/pages/consumer/Messages'
@@ -69,7 +70,7 @@ export const router = createBrowserRouter([
   /* Farmer routes */
   {
     path: '/farmer',
-    element: <DashboardLayout />,
+    element: <DashboardLayout showSearch={false} />,
     children: [
       { index: true, element: <Navigate to="dashboard" replace /> },
       { path: 'dashboard', element: <FarmerDashboard /> },
@@ -91,13 +92,14 @@ export const router = createBrowserRouter([
   /* Consumer routes */
   {
     path: '/consumer',
-    element: <DashboardLayout showSearch />,
+    element: <DashboardLayout showSearch={false} />,
     children: [
       { index: true, element: <Navigate to="home" replace /> },
       { path: 'home', element: <ConsumerHome /> },
       { path: 'search', element: <ConsumerSearch /> },
       { path: 'map', element: <ConsumerMap /> },
       { path: 'cart', element: <ConsumerCart /> },
+      { path: 'wishlist', element: <ConsumerWishlist /> },
       { path: 'checkout', element: <ConsumerCart /> },
       { path: 'orders', element: <ConsumerOrders /> },
       { path: 'orders/:id', element: <ConsumerOrderDetail /> },

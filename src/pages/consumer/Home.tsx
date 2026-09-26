@@ -68,7 +68,14 @@ export default function ConsumerHome() {
         <div className="relative z-10 max-w-2xl">
           <motion.h1 initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-2 text-3xl font-bold text-white font-[family-name:var(--font-display)] lg:text-4xl">{t('consumer.heroBanner')}</motion.h1>
           <p className="mb-6 text-white/90">{t('app.description')}</p>
-          <SearchBar large value={query} onChange={setQuery} onSubmit={() => navigate(`/consumer/search?q=${encodeURIComponent(query)}`)} className="max-w-2xl" />
+          <SearchBar
+            large
+            value={query}
+            onChange={setQuery}
+            onSubmit={() => navigate(`/consumer/search?q=${encodeURIComponent(query)}`)}
+            className="max-w-2xl"
+            suggestions={products.map((product) => product.name).filter(Boolean)}
+          />
         </div>
       </div>
 

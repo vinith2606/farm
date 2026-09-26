@@ -70,7 +70,7 @@ export default function ConsumerSearch() {
       <h1 className="text-2xl font-bold font-[family-name:var(--font-display)]">{t('nav.search')}</h1>
       <div>
         <label className="mb-2 block text-sm font-medium text-foreground">Product name</label>
-        <SearchBar value={query} onChange={setQuery} large />
+        <SearchBar value={query} onChange={setQuery} large suggestions={products.map((product) => product.name).filter(Boolean)} />
       </div>
 
       <div className="max-w-sm">

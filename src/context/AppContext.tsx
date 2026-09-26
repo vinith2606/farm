@@ -32,9 +32,11 @@ interface AuthContextType {
 
 interface CartContextType {
   items: CartItem[]
+  wishlist: Product[]
   addItem: (product: Product, qty?: number) => void
   removeItem: (productId: string) => void
   updateQuantity: (productId: string, qty: number) => void
+  toggleWishlist: (product: Product) => void
   clearCart: () => void
   total: number
   itemCount: number
@@ -166,6 +168,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function CartProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<CartItem[]>([])
+  const [wishlist, setWishlist] = useState<Product[]>([])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const savedWishlist = localStorage.getItem('farmdirect_wishlist')
+      if (savedWishlist) setWishlist(JSON.parse(savedWishlist))
+    } catch {
+      setWishlist([])
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('farmdirect_wishlist', JSON.stringify(wishlist))
+    }
+  }, [wishlist])
 
   const addItem = (product: Product, qty = 1) => {
     setItems((prev) => {
@@ -190,12 +209,19 @@ export function CartProvider({ children }: { children: ReactNode }) {
     )
   }
 
+  const toggleWishlist = (product: Product) => {
+    setWishlist((prev) => {
+      const exists = prev.some((item) => item.id === product.id)
+      return exists ? prev.filter((item) => item.id !== product.id) : [...prev, product]
+    })
+  }
+
   const clearCart = () => setItems([])
   const total = items.reduce((sum, i) => sum + i.product.price * i.quantity, 0)
   const itemCount = items.reduce((sum, i) => sum + i.quantity, 0)
 
   return (
-    <CartContext.Provider value={{ items, addItem, removeItem, updateQuantity, clearCart, total, itemCount }}>
+    <CartContext.Provider value={{ items, wishlist, addItem, removeItem, updateQuantity, toggleWishlist, clearCart, total, itemCount }}>
       {children}
     </CartContext.Provider>
   )

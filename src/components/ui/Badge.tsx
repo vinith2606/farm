@@ -24,7 +24,7 @@ export function Badge({ children, variant = 'default', className }: { children: 
 export function CertificateBadge({ status }: { status: 'verified' | 'pending' | 'rejected' | 'expired' }) {
   const map = {
     verified: { variant: 'verified' as const, label: '✓ Verified' },
-    pending: { variant: 'pending' as const, label: '⏳ Pending' },
+    pending: { variant: 'pending' as const, label: 'Not uploaded' },
     rejected: { variant: 'danger' as const, label: '✗ Rejected' },
     expired: { variant: 'warning' as const, label: '⚠ Expired' },
   }

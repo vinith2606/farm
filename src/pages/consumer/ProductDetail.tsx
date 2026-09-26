@@ -8,12 +8,13 @@ import { Button } from '@/components/ui/Button'
 import { AvailabilityBadge, CertificateBadge } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/Modal'
 import { formatCurrency, formatDate } from '@/utils/cn'
-import { useCart } from '@/context/AppContext'
+import { useAuth, useCart } from '@/context/AppContext'
 import { useToast } from '@/context/ToastContext'
 import api from '@/services/api'
 import { normalizeProduct, normalizeProducts } from '@/utils/productService'
 import type { Product } from '@/types'
 import { StarRating } from '@/components/cards/RatingCard'
+import ReviewForm from '@/components/common/ReviewForm'
 
 export default function ProductDetail() {
   const { id } = useParams()
@@ -21,41 +22,50 @@ export default function ProductDetail() {
   const { t } = useTranslation()
   const { addItem } = useCart()
   const { toast } = useToast()
+  const { userId, userName } = useAuth()
   const [product, setProduct] = useState<Product | null>(null)
   const [related, setRelated] = useState<Product[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [reviews, setReviews] = useState<any[]>([])
 
+  const loadProduct = async () => {
+    if (!id) return
+
+    try {
+      const response = await api.get(`/products/${id}`)
+      const currentProduct = normalizeProduct(response.data.product)
+      setProduct(currentProduct)
+
+      const reviewsResponse = await api.get('/reviews', { params: { productId: id } })
+      setReviews(reviewsResponse.data.reviews || [])
+
+      const relatedResponse = await api.get('/products')
+      const relatedProducts = normalizeProducts(relatedResponse.data.products || [])
+        .filter((p) => p.category === currentProduct.category && p.id !== currentProduct.id)
+        .slice(0, 4)
+
+      setRelated(relatedProducts)
+    } catch (err) {
+      console.error('Failed to load product detail:', err)
+      setError(t('common.noData'))
+    }
+  }
+
   useEffect(() => {
     if (!id) return
 
-    const loadProduct = async () => {
+    const loadData = async () => {
       setLoading(true)
       setError('')
-
       try {
-        const response = await api.get(`/products/${id}`)
-        const currentProduct = normalizeProduct(response.data.product)
-        setProduct(currentProduct)
-        const reviewsResponse = await api.get('/reviews', { params: { productId: id } })
-        setReviews(reviewsResponse.data.reviews || [])
-
-        const relatedResponse = await api.get('/products')
-        const relatedProducts = normalizeProducts(relatedResponse.data.products || [])
-          .filter((p) => p.category === currentProduct.category && p.id !== currentProduct.id)
-          .slice(0, 4)
-
-        setRelated(relatedProducts)
-      } catch (err) {
-        console.error('Failed to load product detail:', err)
-        setError(t('common.noData'))
+        await loadProduct()
       } finally {
         setLoading(false)
       }
     }
 
-    loadProduct()
+    loadData()
   }, [id, t])
 
   if (loading) {
@@ -78,6 +88,8 @@ export default function ProductDetail() {
       </div>
     )
   }
+
+  const userReview = userId ? reviews.find((review) => String(review.user_id) === String(userId)) : undefined
 
   return (
     <div className="space-y-8">
@@ -137,7 +149,25 @@ export default function ProductDetail() {
           <ShieldCheck className="h-5 w-5 text-primary" />
           <div><h2 className="font-semibold">Ratings & Reviews</h2><p className="text-sm text-muted">{product.reviewCount > 0 ? `${product.rating.toFixed(1)} average rating from ${product.reviewCount} reviews.` : 'No reviews yet for this product.'}</p></div>
         </div>
-        {reviews.length > 0 && <div className="mt-5 space-y-4 border-t border-border pt-4">{reviews.map((review) => <div key={review.id}><div className="flex items-center justify-between gap-3"><p className="font-medium">{review.user_name}</p><span className="text-xs text-muted">{formatDate(review.created_at)}</span></div><StarRating rating={review.rating} size="sm" /><p className="mt-1 text-sm text-muted">{review.comment}</p></div>)}</div>}
+        {!userReview && userId && (
+          <div className="mt-5 border-t border-border pt-4">
+            <ReviewForm targetType="product" targetId={product.id} reviewerId={userId} reviewerName={userName} reviewerRole="consumer" title="Write a review" onSubmitted={loadProduct} />
+          </div>
+        )}
+        {userReview && (
+          <div className="mt-5 border-t border-border pt-4">
+            <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-medium">Your review</p>
+                <span className="text-xs text-muted">{formatDate(userReview.created_at)}</span>
+              </div>
+              <div className="mt-2"><StarRating rating={userReview.rating} size="sm" /></div>
+              <p className="mt-2 text-sm text-muted">{userReview.comment}</p>
+              {userReview.review_image && <img src={userReview.review_image} alt="Your product review" className="mt-3 max-h-56 w-full rounded-2xl object-cover" />}
+            </div>
+          </div>
+        )}
+        {reviews.length > 0 && <div className="mt-5 space-y-4 border-t border-border pt-4">{reviews.map((review) => <div key={review.id}><div className="flex items-center justify-between gap-3"><p className="font-medium">{review.user_name}</p><span className="text-xs text-muted">{formatDate(review.created_at)}</span></div><StarRating rating={review.rating} size="sm" /><p className="mt-1 text-sm text-muted">{review.comment}</p>{review.review_image && <img src={review.review_image} alt={`${review.user_name} review`} className="mt-3 max-h-56 w-full rounded-2xl object-cover" />}</div>)}</div>}
       </Card>
 
       {related.length > 0 && (

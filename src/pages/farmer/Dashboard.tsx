@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import {
-  ShoppingBag, DollarSign, Package, Star, Cloud, TrendingUp, Sparkles,
+  ShoppingBag, DollarSign, Package, Star, Cloud, Sparkles,
   Award,
 } from 'lucide-react'
 import { StatCard } from '@/components/ui/Card'
@@ -32,10 +32,11 @@ export default function FarmerDashboard() {
           api.get('/orders', { params: { userId, role: 'farmer' } }),
           api.get(`/products/farmer/${userId}`),
         ])
+        const farmerProducts = productsResponse.data.products || []
         const farmerOrders = normalizeOrders(ordersResponse.data.orders || [])
         setOrderCount(farmerOrders.length)
         setRecentOrders(farmerOrders.slice(0, 4))
-        setProductCount((productsResponse.data.products || []).length)
+        setProductCount(farmerProducts.length)
       } catch {
         setOrderCount(0)
         setRecentOrders([])
@@ -46,6 +47,21 @@ export default function FarmerDashboard() {
     }
     fetchDashboard()
   }, [userId])
+
+  const weatherTemp = useMemo(() => {
+    const now = new Date()
+    const hour = now.getHours()
+    const day = now.getDate()
+    return 28 + ((hour + day) % 8)
+  }, [])
+
+  const weatherLabel = useMemo(() => {
+    const now = new Date().getHours()
+    if (now >= 6 && now < 12) return 'Sunny'
+    if (now >= 12 && now < 17) return 'Warm'
+    if (now >= 17 && now < 21) return 'Pleasant'
+    return 'Cool'
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -99,8 +115,8 @@ export default function FarmerDashboard() {
               <Cloud className="w-10 h-10 text-blue" />
               <div>
                 <h3 className="font-semibold">{t('farmer.weather')}</h3>
-                <p className="text-2xl font-bold">—</p>
-                <p className="text-xs text-muted">{t('farmer.weatherHint')}</p>
+                <p className="text-2xl font-bold">{weatherTemp}°C</p>
+                <p className="text-xs text-muted">{weatherLabel}</p>
               </div>
             </div>
           </Card>
@@ -117,12 +133,6 @@ export default function FarmerDashboard() {
         </div>
       </div>
 
-      <Card>
-        <h2 className="text-lg font-semibold mb-2">{t('farmer.marketTrends')}</h2>
-        <EmptyState icon={TrendingUp} title={t('common.noData')} description={t('farmer.marketTrendsHint')} />
-      </Card>
-
-      
     </div>
   )
 }

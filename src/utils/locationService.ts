@@ -115,3 +115,19 @@ export async function reverseGeocode(coords: Coordinates): Promise<{ address: st
     }
   }
 }
+
+export async function getRouteDurationMinutes(start: Coordinates, end: Coordinates): Promise<number> {
+  if (!isValidCoordinates(start) || !isValidCoordinates(end)) return 0
+
+  try {
+    const response = await fetch(
+      `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=false&alternatives=false&steps=false`
+    )
+    const data = await response.json()
+    const durationSeconds = Number(data?.routes?.[0]?.duration ?? 0)
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 0
+    return Math.max(1, Math.round(durationSeconds / 60))
+  } catch {
+    return 0
+  }
+}

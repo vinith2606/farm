@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, CalendarDays, CreditCard, MapPin, Package, Truck, User } from 'lucide-react'
+import { ArrowLeft, Bike, CalendarDays, CreditCard, MapPin, Package, Truck, User } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
@@ -23,6 +23,46 @@ function deliveryStatus(order: Order) {
   if (order.status === 'out_for_delivery') return 'Out for delivery'
   if (order.deliveryAgentId) return 'Assigned'
   return 'Not assigned'
+}
+
+function ActiveStatusCard({ status }: { status: string }) {
+  const titleMap: Record<string, string> = {
+    accepted: 'Order accepted',
+    pickup: 'Pickup in progress',
+    out_for_delivery: 'Delivery in transit',
+  }
+
+  const messageMap: Record<string, string> = {
+    accepted: 'The order has been accepted and is waiting for pickup.',
+    pickup: 'The rider is picking up the parcel from the farmer.',
+    out_for_delivery: 'The order is now travelling to the customer.',
+  }
+
+  const progressMap: Record<string, string> = {
+    accepted: 'w-1/3',
+    pickup: 'w-2/3',
+    out_for_delivery: 'w-full',
+  }
+
+  return (
+    <Card className="border border-primary/20 bg-primary/5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="status-delivery-orb relative flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+            <Bike className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-foreground">{titleMap[status] || 'Order in progress'}</p>
+            <p className="text-xs text-muted">{messageMap[status] || 'The order is moving forward.'}</p>
+          </div>
+        </div>
+        <span className="h-2.5 w-2.5 rounded-full bg-primary animate-pulse" />
+      </div>
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-border">
+        <div className={`status-progress-bar h-full rounded-full bg-primary ${progressMap[status] || 'w-1/3'}`} />
+      </div>
+    </Card>
+  )
 }
 
 export default function AdminOrderDetail() {
@@ -49,6 +89,7 @@ export default function AdminOrderDetail() {
       <button onClick={() => navigate('/admin/orders')} className="flex items-center gap-2 text-sm font-medium text-primary"><ArrowLeft className="h-4 w-4" /> Back to orders</button>
       <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-medium text-primary">Order Management</p><h1 className="text-3xl font-bold font-[family-name:var(--font-display)]">Order #{order.id}</h1><p className="mt-1 flex items-center gap-2 text-sm text-muted"><CalendarDays className="h-4 w-4" />{formatDate(order.createdAt)}</p></div><div className="flex flex-wrap gap-2"><Badge variant={statusVariant(order.status)}>Order: {order.status.replace(/_/g, ' ')}</Badge><Badge variant={statusVariant(order.paymentStatus)}>Payment: {order.paymentStatus}</Badge><Badge variant={delivery === 'Delivered' ? 'success' : delivery === 'Cancelled' ? 'danger' : 'warning'}>Delivery: {delivery}</Badge></div></div>
       <div className="grid gap-6 md:grid-cols-3"><Card><div className="mb-3 flex items-center gap-2"><User className="h-5 w-5 text-primary" /><h2 className="font-semibold">Farmer Name</h2></div><p className="font-medium">{order.farmerName || 'Not provided'}</p></Card><Card><div className="mb-3 flex items-center gap-2"><User className="h-5 w-5 text-primary" /><h2 className="font-semibold">Consumer Name</h2></div><p className="font-medium">{order.consumerName || 'Not provided'}</p></Card><Card><div className="mb-3 flex items-center gap-2"><Truck className="h-5 w-5 text-primary" /><h2 className="font-semibold">Delivery Partner</h2></div><p className="font-medium">{order.deliveryAgentName || 'Not assigned'}</p></Card></div>
+      {['accepted', 'pickup', 'out_for_delivery'].includes(order.status) && <ActiveStatusCard status={order.status} />}
       <Card><div className="mb-4 flex items-center gap-2"><Package className="h-5 w-5 text-primary" /><h2 className="font-semibold">Product Details</h2></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b border-border bg-surface-elevated"><th className="p-3 text-left">Product</th><th className="p-3 text-left">Quantity</th><th className="p-3 text-right">Unit Price</th><th className="p-3 text-right">Subtotal</th></tr></thead><tbody>{order.items.map((item) => <tr key={item.productId} className="border-b border-border"><td className="p-3 font-medium">{item.productName}</td><td className="p-3">{item.quantity}</td><td className="p-3 text-right">{formatCurrency(item.price)}</td><td className="p-3 text-right font-medium">{formatCurrency(item.price * item.quantity)}</td></tr>)}</tbody><tfoot><tr><td colSpan={3} className="p-3 text-right font-semibold">Order Amount</td><td className="p-3 text-right text-lg font-bold text-primary">{formatCurrency(order.total)}</td></tr></tfoot></table></div></Card>
       <div className="grid gap-6 md:grid-cols-2"><Card><div className="mb-4 flex items-center gap-2"><CreditCard className="h-5 w-5 text-primary" /><h2 className="font-semibold">Payment Status</h2></div><Badge variant={statusVariant(order.paymentStatus)}>{order.paymentStatus}</Badge><p className="mt-3 text-sm text-muted">Payment method: {order.paymentMethod || 'Not specified'}</p></Card><Card><div className="mb-4 flex items-center gap-2"><MapPin className="h-5 w-5 text-primary" /><h2 className="font-semibold">Delivery Details</h2></div><Badge variant={delivery === 'Delivered' ? 'success' : delivery === 'Cancelled' ? 'danger' : 'warning'}>{delivery}</Badge><p className="mt-3 text-sm text-muted">{order.address || 'Delivery address not provided'}</p></Card></div>
     </div>
