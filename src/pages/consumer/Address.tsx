@@ -36,7 +36,27 @@ export default function ConsumerAddress() {
 
   const resetForm = () => { setEditing(false); setAddressLine(''); setLandmark(''); setCity(''); setState(''); setPincode(''); setCoordinates({ lat: 0, lng: 0 }) }
   const editAddress = (address: Address) => { setEditing(true); setAddressLine(address.address_line || ''); setLandmark(address.landmark || ''); setCity(address.city || ''); setState(address.state || ''); setPincode(address.pincode || ''); setCoordinates({ lat: address.lat || 0, lng: address.lng || 0 }) }
-  const useLocation = async () => { setLocating(true); const next = await getCurrentLocation(); const location = await reverseGeocode(next); setCoordinates(next); setAddressLine(location.address); setCity(location.city); setLocating(false) }
+  const useLocation = async () => {
+    setLocating(true)
+    setError('')
+    try {
+      const next = await getCurrentLocation()
+      const location = await reverseGeocode(next)
+      setCoordinates(next)
+      setAddressLine([location.address, location.area].filter((part, index, parts) => part && parts.indexOf(part) === index).join(', ') || addressLine)
+      setLandmark(location.landmark || landmark)
+      setCity(location.city || city)
+      setState(location.state || state)
+      setPincode(location.pincode || pincode)
+      if (!location.state && !location.pincode) {
+        setError('Location found, but state and PIN code could not be resolved. Please enter them manually.')
+      }
+    } catch {
+      setError('Unable to read this location. Please enter the address details manually.')
+    } finally {
+      setLocating(false)
+    }
+  }
   const saveAddress = async () => {
     if (!userId || !addressLine.trim() || !city.trim()) { setError('Address line and city are required.'); return }
     setSaving(true); setError('')

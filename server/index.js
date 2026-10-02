@@ -942,6 +942,36 @@ app.put('/api/users/:id/profile', async (req, res) => {
   }
 })
 
+async function syncUserDefaultAddress(userId, currentAddress) {
+  const defaultAddress = currentAddress || await get(
+    'SELECT * FROM delivery_addresses WHERE user_id = ? AND is_default = 1 ORDER BY created_at DESC LIMIT 1',
+    [userId]
+  )
+
+  if (!defaultAddress) {
+    await run(
+      'UPDATE users SET address = ?, city = ?, state = ?, pincode = ?, lat = ?, lng = ? WHERE id = ?',
+      [null, null, null, null, null, null, userId]
+    )
+    return
+  }
+
+  await run(
+    `UPDATE users
+     SET address = ?, city = ?, state = ?, pincode = ?, lat = ?, lng = ?
+     WHERE id = ?`,
+    [
+      defaultAddress.address_line || null,
+      defaultAddress.city || null,
+      defaultAddress.state || null,
+      defaultAddress.pincode || null,
+      defaultAddress.lat || null,
+      defaultAddress.lng || null,
+      userId,
+    ]
+  )
+}
+
 app.get('/api/users/:id/addresses', async (req, res) => {
   try {
     const addresses = await all('SELECT * FROM delivery_addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC', [req.params.id])
@@ -956,13 +986,22 @@ app.post('/api/users/:id/addresses', async (req, res) => {
   try {
     const { label, address_line, landmark, city, state, pincode, lat, lng, is_default } = req.body || {}
     if (!address_line?.trim() || !city?.trim()) return res.status(400).json({ message: 'Address line and city are required.' })
-    if (is_default) await run('UPDATE delivery_addresses SET is_default = 0 WHERE user_id = ?', [req.params.id])
+
+    if (is_default) {
+      await run('UPDATE delivery_addresses SET is_default = 0 WHERE user_id = ?', [req.params.id])
+    }
+
     const result = await run(
       `INSERT INTO delivery_addresses (user_id, label, address_line, landmark, city, state, pincode, lat, lng, is_default)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [req.params.id, label?.trim() || 'Home', address_line.trim(), landmark?.trim() || null, city.trim(), state?.trim() || null, pincode?.trim() || null, lat || null, lng || null, is_default ? 1 : 0]
     )
     const address = await get('SELECT * FROM delivery_addresses WHERE id = ?', [result.id])
+
+    if (Number(address.is_default) === 1) {
+      await syncUserDefaultAddress(req.params.id, address)
+    }
+
     res.status(201).json({ message: 'Address saved successfully.', address })
   } catch (error) {
     console.error('Address save error:', error)
@@ -970,10 +1009,43 @@ app.post('/api/users/:id/addresses', async (req, res) => {
   }
 })
 
+app.put('/api/users/:userId/addresses/:addressId/default', async (req, res) => {
+  try {
+    const address = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+    if (!address) return res.status(404).json({ message: 'Address not found.' })
+
+    await run('UPDATE delivery_addresses SET is_default = 0 WHERE user_id = ?', [req.params.userId])
+    await run('UPDATE delivery_addresses SET is_default = 1 WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+    await syncUserDefaultAddress(req.params.userId, address)
+
+    const updatedAddress = await get('SELECT * FROM delivery_addresses WHERE id = ?', [req.params.addressId])
+    const user = await get('SELECT id, name, email, phone, lat, lng, address, city, pincode, state FROM users WHERE id = ?', [req.params.userId])
+    res.json({ message: 'Default address updated.', address: updatedAddress, user: user || null })
+  } catch (error) {
+    console.error('Default address update error:', error)
+    res.status(500).json({ message: 'Unable to update default address right now.' })
+  }
+})
+
 app.delete('/api/users/:userId/addresses/:addressId', async (req, res) => {
   try {
+    const existing = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+    if (!existing) return res.status(404).json({ message: 'Address not found.' })
+
+    const isDefault = Number(existing.is_default) === 1
     const result = await run('DELETE FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
     if (!result.changes) return res.status(404).json({ message: 'Address not found.' })
+
+    if (isDefault) {
+      const nextDefault = await get('SELECT * FROM delivery_addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC LIMIT 1', [req.params.userId])
+      if (nextDefault) {
+        await run('UPDATE delivery_addresses SET is_default = 1 WHERE id = ?', [nextDefault.id])
+        await syncUserDefaultAddress(req.params.userId, nextDefault)
+      } else {
+        await run('UPDATE users SET address = ?, city = ?, state = ?, pincode = ?, lat = ?, lng = ? WHERE id = ?', [null, null, null, null, null, null, req.params.userId])
+      }
+    }
+
     res.json({ message: 'Address removed successfully.' })
   } catch (error) {
     console.error('Address delete error:', error)

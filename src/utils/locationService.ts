@@ -74,19 +74,74 @@ export function buildDirectionsUrl(start: Coordinates, end: Coordinates): string
   return `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${start.lat}%2C${start.lng}%3B${end.lat}%2C${end.lng}`
 }
 
-export async function geocodeAddress(address: string): Promise<Coordinates | null> {
-  if (!address.trim()) return null
-  try {
-    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(address)}`)
-    const results = await response.json()
-    if (!results[0]) return null
-    return { lat: Number(results[0].lat), lng: Number(results[0].lon) }
-  } catch {
-    return null
-  }
+function normalizeLocationCandidate(value: string | null | undefined): string {
+  return String(value || '').trim().replace(/\s+/g, ' ')
 }
 
-export async function reverseGeocode(coords: Coordinates): Promise<{ address: string; city: string; displayName: string }> {
+export function buildAddressSearchQuery(parts: Array<string | null | undefined>): string {
+  const cleaned = parts
+    .map(normalizeLocationCandidate)
+    .filter(Boolean)
+    .filter((part, index, array) => array.indexOf(part) === index)
+
+  return cleaned.join(', ')
+}
+
+export async function geocodeAddress(address: string): Promise<Coordinates | null> {
+  const normalizedAddress = normalizeLocationCandidate(address)
+  if (!normalizedAddress) return null
+
+  const candidateQueries = Array.from(new Set([
+    normalizedAddress,
+    `${normalizedAddress}, India`,
+    normalizedAddress.replace(/,\s*India$/i, ''),
+  ]))
+
+  for (const query of candidateQueries) {
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=in&addressdetails=1&q=${encodeURIComponent(query)}`,
+        {
+          headers: {
+            Accept: 'application/json',
+          },
+        }
+      )
+      const results = await response.json()
+      if (!Array.isArray(results) || results.length === 0) continue
+
+      const exactMatch = results.find((result) => {
+        const displayName = String(result?.display_name || '').toLowerCase()
+        return displayName.includes(normalizedAddress.toLowerCase())
+      })
+
+      const selected = exactMatch || results[0]
+      if (!selected) continue
+
+      return {
+        lat: Number(selected.lat),
+        lng: Number(selected.lon),
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+export interface ReverseGeocodedAddress {
+  address: string
+  area: string
+  landmark: string
+  city: string
+  state: string
+  pincode: string
+  houseNumber: string
+  displayName: string
+}
+
+export async function reverseGeocode(coords: Coordinates): Promise<ReverseGeocodedAddress> {
   try {
     const response = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}`,
@@ -98,19 +153,34 @@ export async function reverseGeocode(coords: Coordinates): Promise<{ address: st
     )
 
     const data = await response.json()
-    const address = data.address?.road || data.address?.neighbourhood || data.address?.suburb || data.address?.village || data.address?.town || data.address?.city || data.display_name || ''
-    const city = data.address?.city || data.address?.town || data.address?.village || data.address?.state || ''
+    const addressParts = data.address || {}
+    const address = addressParts.road || addressParts.pedestrian || addressParts.footway || ''
+    const area = addressParts.neighbourhood || addressParts.suburb || addressParts.quarter || addressParts.residential || addressParts.village || ''
+    const landmark = addressParts.amenity || addressParts.building || addressParts.shop || addressParts.leisure || area
+    const city = addressParts.city || addressParts.town || addressParts.village || addressParts.municipality || addressParts.county || ''
+    const state = addressParts.state || addressParts.region || ''
+    const pincode = addressParts.postcode || ''
     const displayName = city ? `${city}, India` : address || data.display_name || DEFAULT_LOCATION_LABEL
 
     return {
-      address: address || data.display_name || DEFAULT_LOCATION_LABEL,
-      city: city || DEFAULT_LOCATION_LABEL,
+      address: address || area || data.display_name || '',
+      area,
+      landmark,
+      city,
+      state,
+      pincode,
+      houseNumber: addressParts.house_number || '',
       displayName,
     }
   } catch (error) {
     return {
-      address: DEFAULT_LOCATION_LABEL,
-      city: DEFAULT_LOCATION_LABEL,
+      address: '',
+      area: '',
+      landmark: '',
+      city: '',
+      state: '',
+      pincode: '',
+      houseNumber: '',
       displayName: DEFAULT_LOCATION_LABEL,
     }
   }

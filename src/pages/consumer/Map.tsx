@@ -4,7 +4,7 @@ import { MapPin } from 'lucide-react'
 import { MapView, LocationCard } from '@/components/common/MapView'
 import { Card } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/Modal'
-import { attachDistanceToMarkers, DEFAULT_LOCATION, geocodeAddress, getCurrentLocation } from '@/utils/locationService'
+import { attachDistanceToMarkers, buildAddressSearchQuery, DEFAULT_LOCATION, geocodeAddress, getCurrentLocation } from '@/utils/locationService'
 import api from '@/services/api'
 import type { FarmerMarker } from '@/types'
 
@@ -21,7 +21,16 @@ export default function ConsumerMap() {
     api.get('/admin/users').then(async (response) => {
       const farmerUsers = (response.data.users || []).filter((user: any) => user.role === 'farmer')
       const farmerMarkers = (await Promise.all(farmerUsers.map(async (user: any) => {
-        const coordinates = user.lat != null && user.lng != null ? { lat: Number(user.lat), lng: Number(user.lng) } : await geocodeAddress([user.address, user.city, 'India'].filter(Boolean).join(', '))
+        const coordinates = user.lat != null && user.lng != null
+          ? { lat: Number(user.lat), lng: Number(user.lng) }
+          : await geocodeAddress(buildAddressSearchQuery([
+              user.address,
+              user.houseNumber,
+              user.city,
+              user.state,
+              user.pincode,
+              'India',
+            ]))
         if (!coordinates) return null
         return { id: String(user.id), name: user.farmName || user.name, ...coordinates, rating: 0, verified: user.certificateStatus === 'verified', phone: user.phone }
       }))).filter(Boolean)

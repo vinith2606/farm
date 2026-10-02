@@ -21,7 +21,13 @@ export default function FarmerDelivery() {
         const response = await api.get('/admin/users')
         const agentUsers = (response.data.users || []).filter((user: any) => user.role === 'delivery')
         const agents = (await Promise.all(agentUsers.map(async (user: any) => {
-          const coordinates = user.lat != null && user.lng != null ? { lat: Number(user.lat), lng: Number(user.lng) } : await geocodeAddress([user.address, user.city, 'India'].filter(Boolean).join(', '))
+          const coordinates = user.lat != null && user.lng != null ? { lat: Number(user.lat), lng: Number(user.lng) } : await geocodeAddress([
+            user.address,
+            user.city,
+            user.state,
+            user.pincode,
+            'India',
+          ].filter(Boolean).join(', '))
           if (!coordinates) return null
           return { id: String(user.id), name: user.name, ...coordinates, rating: 0, verified: user.accountStatus !== 'suspended', phone: user.phone, deliveryStatus: user.availabilityStatus === 'unavailable' ? 'Unavailable' : 'Available' }
         }))).filter(Boolean) as FarmerMarker[]
