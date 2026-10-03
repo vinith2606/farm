@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AppContext'
 import { useToast } from '@/context/ToastContext'
 import api from '@/services/api'
-import { getCurrentLocation, reverseGeocode } from '@/utils/locationService'
+import { requestCurrentLocation, reverseGeocode } from '@/utils/locationService'
 
 type Address = {
   id: number
@@ -21,6 +21,7 @@ type Address = {
   lat?: number
   lng?: number
 }
+type AddressLabel = 'Home' | 'Work' | 'Other'
 
 export default function FarmerAddress() {
   const navigate = useNavigate()
@@ -28,6 +29,7 @@ export default function FarmerAddress() {
   const { toast } = useToast()
   const [addresses, setAddresses] = useState<Address[]>([])
   const [editing, setEditing] = useState(false)
+  const [label, setLabel] = useState<AddressLabel>('Home')
   const [houseNumber, setHouseNumber] = useState('')
   const [floor, setFloor] = useState('')
   const [buildingBlock, setBuildingBlock] = useState('')
@@ -75,6 +77,7 @@ export default function FarmerAddress() {
 
   const resetForm = () => {
     setEditing(false)
+    setLabel('Home')
     setHouseNumber('')
     setFloor('')
     setBuildingBlock('')
@@ -90,7 +93,7 @@ export default function FarmerAddress() {
     setLocating(true)
     setError('')
     try {
-      const nextCoordinates = await getCurrentLocation()
+      const nextCoordinates = await requestCurrentLocation()
       const location = await reverseGeocode(nextCoordinates)
       setCoordinates(nextCoordinates)
       setHouseNumber(location.houseNumber || houseNumber)
@@ -120,15 +123,16 @@ export default function FarmerAddress() {
     setError('')
     try {
       const completeAddress = [houseNumber, floor, buildingBlock, landmark, city, state, pincode].filter(Boolean).join(', ')
+      const hasCoordinates = coordinates.lat !== 0 || coordinates.lng !== 0
       const response = await api.post(`/users/${userId}/addresses`, {
-        label: 'Farm',
+        label,
         address_line: completeAddress,
         landmark,
         city,
         state,
         pincode,
-        lat: coordinates.lat || null,
-        lng: coordinates.lng || null,
+        lat: hasCoordinates ? coordinates.lat : null,
+        lng: hasCoordinates ? coordinates.lng : null,
         is_default: addresses.length === 0,
       })
 
@@ -142,7 +146,7 @@ export default function FarmerAddress() {
         farmName,
         description: userDescription,
         avatar: userAvatar || '',
-        location: savedAddress.lat && savedAddress.lng ? {
+        location: savedAddress.lat != null && savedAddress.lng != null ? {
           lat: savedAddress.lat,
           lng: savedAddress.lng,
           address: savedAddress.address_line || '',
@@ -172,7 +176,7 @@ export default function FarmerAddress() {
           farmName,
           description: userDescription,
           avatar: userAvatar || '',
-          location: defaultAddress.lat && defaultAddress.lng ? {
+          location: defaultAddress.lat != null && defaultAddress.lng != null ? {
             lat: defaultAddress.lat,
             lng: defaultAddress.lng,
             address: defaultAddress.address_line || '',
@@ -217,6 +221,7 @@ export default function FarmerAddress() {
         {editing && (
           <div className="mt-6 border-t border-border pt-5">
             <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block text-sm font-medium text-foreground">Save as<select value={label} onChange={(event) => setLabel(event.target.value as AddressLabel)} className="mt-1.5 w-full rounded-xl border border-border bg-surface-elevated px-3 py-2.5 text-sm text-foreground"><option>Home</option><option>Work</option><option>Other</option></select></label>
               <Input label="House number *" value={houseNumber} onChange={(event) => setHouseNumber(event.target.value)} placeholder="12A" />
               <Input label="Floor *" value={floor} onChange={(event) => setFloor(event.target.value)} placeholder="2nd floor" />
               <Input label="Building & block *" value={buildingBlock} onChange={(event) => setBuildingBlock(event.target.value)} placeholder="Green Residency, Block B" />

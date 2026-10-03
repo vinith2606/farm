@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { UserRole, CartItem, Product, Location } from '@/types'
 import api from '@/services/api'
+import { disconnectSocket } from '@/services/socket'
 
 interface AuthProfile {
   id?: string
@@ -9,7 +10,7 @@ interface AuthProfile {
   farmName?: string
   description?: string
   avatar?: string
-  certificateStatus?: 'verified' | 'pending' | 'rejected' | 'expired'
+  certificateStatus?: 'verified' | 'pending' | 'rejected' | 'expired' | 'not_uploaded'
   location?: Location
 }
 
@@ -23,7 +24,7 @@ interface AuthContextType {
   farmName: string
   userDescription: string
   userAvatar: string
-  certificateStatus: 'verified' | 'pending' | 'rejected' | 'expired'
+  certificateStatus: 'verified' | 'pending' | 'rejected' | 'expired' | 'not_uploaded'
   login: (role: UserRole, name?: string, profile?: Partial<AuthProfile>) => void
   updateProfile: (name: string, profileData: Partial<AuthProfile>) => void
   logout: () => void
@@ -62,10 +63,15 @@ function getStoredProfile(): AuthProfile {
   }
 }
 
+function getStoredRole(): UserRole | null {
+  const storedRole = localStorage.getItem('farmdirect_role')
+  return storedRole && ['farmer', 'consumer', 'delivery', 'admin'].includes(storedRole)
+    ? storedRole as UserRole
+    : null
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [role, setRole] = useState<UserRole | null>(() => {
-    return localStorage.getItem('farmdirect_role') as UserRole | null
-  })
+  const [role, setRole] = useState<UserRole | null>(getStoredRole)
   const storedProfile = getStoredProfile()
   const [userName, setUserName] = useState(() => localStorage.getItem('farmdirect_user') || 'Guest')
   const [userId, setUserId] = useState<string | undefined>(() => localStorage.getItem('farmdirect_user_id') || storedProfile.id)
@@ -86,8 +92,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           farmName: user.farmName || '',
           description: user.description || '',
           avatar: user.avatar || '',
-          certificateStatus: user.certificateStatus || 'pending',
-          location: user.lat && user.lng ? {
+          certificateStatus: user.certificateStatus || (role === 'farmer' ? 'not_uploaded' : 'pending'),
+          location: user.lat != null && user.lng != null ? {
             lat: user.lat,
             lng: user.lng,
             address: user.address || '',
@@ -131,6 +137,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const logout = () => {
+    disconnectSocket()
     setRole(null)
     setUserName('Guest')
     setUserId(undefined)
@@ -140,6 +147,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem('farmdirect_user_id')
     localStorage.removeItem('farmdirect_profile')
     localStorage.removeItem('farmdirect_token')
+    localStorage.removeItem('farmdirect_wishlist')
   }
 
   return (
@@ -154,7 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         farmName: profile.farmName || '',
         userDescription: profile.description || '',
         userAvatar: profile.avatar || '',
-        certificateStatus: profile.certificateStatus || 'pending',
+        certificateStatus: profile.certificateStatus || (role === 'farmer' ? 'not_uploaded' : 'pending'),
         login,
         updateProfile,
         logout,
@@ -167,24 +175,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 }
 
 export function CartProvider({ children }: { children: ReactNode }) {
+  const { userId } = useAuth()
+  const ownerKey = userId || 'guest'
   const [items, setItems] = useState<CartItem[]>([])
   const [wishlist, setWishlist] = useState<Product[]>([])
+  const [wishlistOwner, setWishlistOwner] = useState<string | null>(null)
+  const [cartOwner, setCartOwner] = useState<string | null>(null)
+
+  useEffect(() => {
+    setItems([])
+    setCartOwner(ownerKey)
+  }, [ownerKey])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
     try {
-      const savedWishlist = localStorage.getItem('farmdirect_wishlist')
-      if (savedWishlist) setWishlist(JSON.parse(savedWishlist))
+      const savedWishlist = localStorage.getItem(`farmdirect_wishlist_${ownerKey}`)
+      setWishlist(savedWishlist ? JSON.parse(savedWishlist) : [])
     } catch {
       setWishlist([])
     }
-  }, [])
+    setWishlistOwner(ownerKey)
+  }, [ownerKey])
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('farmdirect_wishlist', JSON.stringify(wishlist))
-    }
-  }, [wishlist])
+    if (typeof window === 'undefined' || wishlistOwner !== ownerKey) return
+    localStorage.setItem(`farmdirect_wishlist_${ownerKey}`, JSON.stringify(wishlist))
+  }, [ownerKey, wishlist, wishlistOwner])
 
   const addItem = (product: Product, qty = 1) => {
     setItems((prev) => {
@@ -221,7 +238,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const itemCount = items.reduce((sum, i) => sum + i.quantity, 0)
 
   return (
-    <CartContext.Provider value={{ items, wishlist, addItem, removeItem, updateQuantity, toggleWishlist, clearCart, total, itemCount }}>
+    <CartContext.Provider value={{ items: cartOwner === ownerKey ? items : [], wishlist: wishlistOwner === ownerKey ? wishlist : [], addItem, removeItem, updateQuantity, toggleWishlist, clearCart, total: cartOwner === ownerKey ? total : 0, itemCount: cartOwner === ownerKey ? itemCount : 0 }}>
       {children}
     </CartContext.Provider>
   )

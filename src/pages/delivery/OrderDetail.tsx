@@ -8,7 +8,8 @@ import { EmptyState } from '@/components/ui/Modal'
 import { useAuth } from '@/context/AppContext'
 import api from '@/services/api'
 import { normalizeOrders } from '@/utils/orderService'
-import { buildDirectionsUrl, DEFAULT_LOCATION, getCurrentLocation } from '@/utils/locationService'
+import { buildDirectionsUrl, requestCurrentLocation } from '@/utils/locationService'
+import type { Coordinates } from '@/utils/locationService'
 import type { Order } from '@/types'
 
 type DetailTab = 'pickup' | 'delivery'
@@ -63,16 +64,16 @@ function ActiveStatusCard({ status }: { status: string }) {
 export default function DeliveryOrderDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const { userId, userName } = useAuth()
+  const { userId } = useAuth()
   const [order, setOrder] = useState<Order | null>(null)
   const [tab, setTab] = useState<DetailTab>('pickup')
   const [loading, setLoading] = useState(true)
   const [updating, setUpdating] = useState(false)
   const [parcelPhoto, setParcelPhoto] = useState('')
-  const [origin, setOrigin] = useState(DEFAULT_LOCATION)
+  const [origin, setOrigin] = useState<Coordinates | null>(null)
 
   useEffect(() => {
-    getCurrentLocation().then(setOrigin)
+    requestCurrentLocation().then(setOrigin).catch(() => setOrigin(null))
   }, [])
 
   const loadOrder = async () => {
@@ -104,8 +105,6 @@ export default function DeliveryOrderDetail() {
     try {
       await api.put(`/orders/${order.id}/status`, {
         status,
-        delivery_agent_id: Number(userId),
-        delivery_agent_name: userName,
         ...(status === 'pickup' || status === 'out_for_delivery' ? { pickup_parcel_photo: parcelPhoto || undefined } : {}),
         ...(status === 'completed' ? { delivery_parcel_photo: parcelPhoto || undefined } : {}),
       })
@@ -123,7 +122,7 @@ export default function DeliveryOrderDetail() {
   const deliveryLocation = order.consumerLat != null && order.consumerLng != null ? { lat: order.consumerLat, lng: order.consumerLng } : null
   const isPickup = tab === 'pickup'
   const navigationLocation = tab === 'pickup' ? pickupLocation : deliveryLocation
-  const navigationUrl = navigationLocation ? buildDirectionsUrl(origin, navigationLocation) : null
+  const navigationUrl = origin && navigationLocation ? buildDirectionsUrl(origin, navigationLocation) : null
   const locationAddress = isPickup ? order.pickupAddress : order.deliveryAddress
   const mapPath = `/delivery/map?orderId=${order.id}${navigationLocation ? `&lat=${navigationLocation.lat}&lng=${navigationLocation.lng}` : ''}&address=${encodeURIComponent(locationAddress || '')}`
 
@@ -135,7 +134,7 @@ export default function DeliveryOrderDetail() {
       <Card><div className="mb-4 flex items-center gap-2"><Package className="h-5 w-5 text-primary" /><h2 className="font-semibold">Order items</h2></div><div className="space-y-3">{order.items.map((item) => <div key={item.productId} className="flex items-center justify-between border-b border-border pb-3 last:border-0 last:pb-0"><div><p className="font-medium">{item.productName}</p><p className="text-sm text-muted">{order.farmerName}</p></div><span className="font-semibold">Quantity: {item.quantity}</span></div>)}</div></Card>
       {(order.pickupParcelPhoto || order.deliveryParcelPhoto) && <Card><h2 className="mb-4 font-semibold">Parcel photos</h2><div className="grid gap-4 sm:grid-cols-2">{order.pickupParcelPhoto && <div><p className="mb-2 text-sm text-muted">Pickup photo</p><img src={order.pickupParcelPhoto} alt="Parcel at pickup" className="max-h-64 w-full rounded-2xl object-cover" /></div>}{order.deliveryParcelPhoto && <div><p className="mb-2 text-sm text-muted">Delivery photo</p><img src={order.deliveryParcelPhoto} alt="Parcel at delivery" className="max-h-64 w-full rounded-2xl object-cover" /></div>}</div></Card>}
       {(order.status === 'accepted' || order.status === 'pickup' || order.status === 'out_for_delivery') && <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-dashed border-primary/40 bg-primary/5 p-4 text-sm"><Camera className="h-5 w-5 text-primary" /><span>{parcelPhoto ? 'Parcel photo selected' : `Add ${order.status === 'out_for_delivery' ? 'delivery' : 'pickup'} parcel photo (optional)`}</span><input type="file" accept="image/*" className="sr-only" onChange={handleParcelPhoto} /></label>}
-      <div className="flex flex-wrap gap-3">{order.status === 'accepted' && !order.deliveryAgentId && <><Button loading={updating} onClick={() => updateStatus('pickup')}>Accept delivery</Button><Button variant="danger" loading={updating} onClick={() => updateStatus('cancelled')}>Reject request</Button></>}{order.status === 'pickup' && order.deliveryAgentId && <Button variant="outline" loading={updating} onClick={() => updateStatus('out_for_delivery')}>Mark as picked up</Button>}{order.status === 'out_for_delivery' && <Button variant="accent" loading={updating} onClick={() => updateStatus('completed')}><CheckCircle2 className="h-4 w-4" /> Mark as delivered</Button>}</div>
+      <div className="flex flex-wrap gap-3">{order.status === 'accepted' && !order.deliveryAgentId && <Button loading={updating} onClick={() => updateStatus('pickup')}>Accept delivery</Button>}{order.status === 'pickup' && order.deliveryAgentId === userId && <Button variant="outline" loading={updating} onClick={() => updateStatus('out_for_delivery')}>Mark as picked up</Button>}{order.status === 'out_for_delivery' && order.deliveryAgentId === userId && <Button variant="accent" loading={updating} onClick={() => updateStatus('completed')}><CheckCircle2 className="h-4 w-4" /> Mark as delivered</Button>}</div>
     </div>
   )
 }

@@ -22,12 +22,13 @@ export default function ProductDetail() {
   const { t } = useTranslation()
   const { addItem } = useCart()
   const { toast } = useToast()
-  const { userId, userName } = useAuth()
+  const { userId, userName, role } = useAuth()
   const [product, setProduct] = useState<Product | null>(null)
   const [related, setRelated] = useState<Product[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [reviews, setReviews] = useState<any[]>([])
+  const [canReview, setCanReview] = useState(false)
 
   const loadProduct = async () => {
     if (!id) return
@@ -46,6 +47,20 @@ export default function ProductDetail() {
         .slice(0, 4)
 
       setRelated(relatedProducts)
+      if (userId && role === 'consumer') {
+        try {
+          const ordersResponse = await api.get('/orders')
+          const productId = Number(currentProduct.id)
+          setCanReview((ordersResponse.data.orders || []).some((order: any) =>
+            ['completed', 'delivered'].includes(order.status) &&
+            (order.items || []).some((item: any) => Number(item.product_id) === productId)
+          ))
+        } catch {
+          setCanReview(false)
+        }
+      } else {
+        setCanReview(false)
+      }
     } catch (err) {
       console.error('Failed to load product detail:', err)
       setError(t('common.noData'))
@@ -66,7 +81,7 @@ export default function ProductDetail() {
     }
 
     loadData()
-  }, [id, t])
+  }, [id, role, t, userId])
 
   if (loading) {
     return (
@@ -149,7 +164,7 @@ export default function ProductDetail() {
           <ShieldCheck className="h-5 w-5 text-primary" />
           <div><h2 className="font-semibold">Ratings & Reviews</h2><p className="text-sm text-muted">{product.reviewCount > 0 ? `${product.rating.toFixed(1)} average rating from ${product.reviewCount} reviews.` : 'No reviews yet for this product.'}</p></div>
         </div>
-        {!userReview && userId && (
+        {!userReview && userId && canReview && (
           <div className="mt-5 border-t border-border pt-4">
             <ReviewForm targetType="product" targetId={product.id} reviewerId={userId} reviewerName={userName} reviewerRole="consumer" title="Write a review" onSubmitted={loadProduct} />
           </div>

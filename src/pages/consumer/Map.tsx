@@ -4,22 +4,23 @@ import { MapPin } from 'lucide-react'
 import { MapView, LocationCard } from '@/components/common/MapView'
 import { Card } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/Modal'
-import { attachDistanceToMarkers, buildAddressSearchQuery, DEFAULT_LOCATION, geocodeAddress, getCurrentLocation } from '@/utils/locationService'
+import { attachDistanceToMarkers, buildAddressSearchQuery, DEFAULT_LOCATION, geocodeAddress, requestCurrentLocation } from '@/utils/locationService'
 import api from '@/services/api'
 import type { FarmerMarker } from '@/types'
+import type { Coordinates } from '@/utils/locationService'
 
 type FarmerFilter = 'all' | 'verified' | 'nearby'
 
 export default function ConsumerMap() {
   const { t } = useTranslation()
-  const [userLocation, setUserLocation] = useState(DEFAULT_LOCATION)
+  const [userLocation, setUserLocation] = useState<Coordinates | null>(null)
   const [farmers, setFarmers] = useState<FarmerMarker[]>([])
   const [filter, setFilter] = useState<FarmerFilter>('all')
 
   useEffect(() => {
-    getCurrentLocation().then(setUserLocation)
-    api.get('/admin/users').then(async (response) => {
-      const farmerUsers = (response.data.users || []).filter((user: any) => user.role === 'farmer')
+    requestCurrentLocation().then(setUserLocation).catch(() => setUserLocation(null))
+    api.get('/locations/farmers').then(async (response) => {
+      const farmerUsers = response.data.farmers || []
       const farmerMarkers = (await Promise.all(farmerUsers.map(async (user: any) => {
         const coordinates = user.lat != null && user.lng != null
           ? { lat: Number(user.lat), lng: Number(user.lng) }
@@ -32,18 +33,22 @@ export default function ConsumerMap() {
               'India',
             ]))
         if (!coordinates) return null
-        return { id: String(user.id), name: user.farmName || user.name, ...coordinates, rating: 0, verified: user.certificateStatus === 'verified', phone: user.phone }
+        return { id: String(user.id), name: user.name, ...coordinates, rating: Number(user.rating || 0), verified: user.certificateStatus === 'verified', phone: user.phone }
       }))).filter(Boolean)
       setFarmers(farmerMarkers as FarmerMarker[])
     }).catch(() => setFarmers([]))
   }, [])
 
-  const nearbyFarmers = useMemo(() => attachDistanceToMarkers(farmers, userLocation), [farmers, userLocation])
+  const nearbyFarmers = useMemo(() => userLocation
+    ? attachDistanceToMarkers(farmers, userLocation)
+    : farmers,
+  [farmers, userLocation])
   const filteredFarmers = useMemo(() => {
+    if (filter === 'nearby' && !userLocation) return []
     if (filter === 'verified') return nearbyFarmers.filter((farmer) => farmer.verified)
-    if (filter === 'nearby') return nearbyFarmers.filter((farmer) => farmer.distance <= 70)
+    if (filter === 'nearby') return nearbyFarmers.filter((farmer) => farmer.distance != null && farmer.distance <= 70)
     return nearbyFarmers
-  }, [filter, nearbyFarmers])
+  }, [filter, nearbyFarmers, userLocation])
 
   return (
     <div className="space-y-6">
@@ -60,12 +65,12 @@ export default function ConsumerMap() {
           </button>
         ))}
       </div>
-      <MapView markers={filteredFarmers} center={userLocation} height="450px" />
+      <MapView markers={filteredFarmers} center={userLocation || DEFAULT_LOCATION} height="450px" />
       {filteredFarmers.length === 0 ? (
         <Card><EmptyState icon={MapPin} title={t('common.noData')} description={filter === 'nearby' ? t('consumer.nearby') : t('consumer.nearbyFarmers')} /></Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {filteredFarmers.map((m) => <LocationCard key={m.id} marker={m} origin={userLocation} />)}
+          {filteredFarmers.map((m) => <LocationCard key={m.id} marker={m} origin={userLocation || undefined} />)}
         </div>
       )}
     </div>

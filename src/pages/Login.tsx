@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Card } from '@/components/ui/Card'
 import api, { endpoints } from '@/services/api'
-import { getCurrentLocation, reverseGeocode } from '@/utils/locationService'
+import { requestCurrentLocation, reverseGeocode } from '@/utils/locationService'
 
 const roleRoutes: Record<UserRole, string> = {
   farmer: '/farmer/dashboard',
@@ -71,16 +71,11 @@ export default function Login() {
     try {
       setErrorMessage('')
 
-      let signupLocation = {
-        lat: 12.9716,
-        lng: 77.5946,
-        address: 'Default Location',
-        city: 'Bangalore',
-      }
+      let signupLocation: { lat: number; lng: number; address: string; city: string } | null = null
 
       if (mode === 'signup') {
         try {
-          const coords = await getCurrentLocation()
+          const coords = await requestCurrentLocation()
           const reverse = await reverseGeocode(coords)
           signupLocation = {
             lat: coords.lat,
@@ -100,10 +95,12 @@ export default function Login() {
         ...(mode === 'signup' && {
           name: data.name,
           phone: data.phone,
-          lat: signupLocation.lat,
-          lng: signupLocation.lng,
-          address: signupLocation.address,
-          city: signupLocation.city,
+          ...(signupLocation ? {
+            lat: signupLocation.lat,
+            lng: signupLocation.lng,
+            address: signupLocation.address,
+            city: signupLocation.city,
+          } : {}),
         }),
       }
 
@@ -118,7 +115,7 @@ export default function Login() {
         email: user.email || data.email,
         phone: user.phone || data.phone || '',
         certificateStatus: user.certificateStatus || 'pending',
-        location: (user.lat && user.lng) ? {
+        location: user.lat != null && user.lng != null ? {
           lat: user.lat,
           lng: user.lng,
           address: user.address || '',

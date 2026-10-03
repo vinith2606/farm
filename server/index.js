@@ -5,13 +5,14 @@ import { Server as IOServer } from 'socket.io'
 import sqlite3 from 'sqlite3'
 import crypto from 'crypto'
 import fs from 'fs/promises'
+import { AsyncLocalStorage } from 'async_hooks'
 import { fileURLToPath } from 'url'
 import path from 'path'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PORT = Number(process.env.PORT || 3001)
-const DB_PATH = path.join(__dirname, 'farmdirect.sqlite')
+const DB_PATH = process.env.FARMDIRECT_DB_PATH || path.join(__dirname, 'farmdirect.sqlite')
 const CERTIFICATE_IMAGE_DIR = path.join(__dirname, 'certificates')
 const DEFAULT_ADMIN = {
   role: 'admin',
@@ -20,12 +21,40 @@ const DEFAULT_ADMIN = {
   phone: '0000000000',
   password: process.env.ADMIN_PASSWORD || 'admin123',
 }
+const AUTH_TOKEN_SECRET = process.env.FARMDIRECT_AUTH_SECRET || (process.env.NODE_ENV === 'production' ? '' : 'farmdirect-local-development-secret')
+
+if (!AUTH_TOKEN_SECRET) {
+  throw new Error('FARMDIRECT_AUTH_SECRET must be configured in production.')
+}
+if (process.env.NODE_ENV === 'production' && !process.env.ADMIN_PASSWORD) {
+  throw new Error('ADMIN_PASSWORD must be configured in production.')
+}
 
 const app = express()
 const db = new sqlite3.Database(DB_PATH)  
 const allowedRoles = ['farmer', 'consumer', 'delivery', 'admin']
+const addressLabels = new Set(['Home', 'Work', 'Other'])
+const transactionContext = new AsyncLocalStorage()
+let transactionQueue = Promise.resolve()
 
-const hashPassword = (password) => crypto.createHash('sha256').update(password).digest('hex')
+const hashPassword = (password) => {
+  const salt = crypto.randomBytes(16).toString('hex')
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex')
+  return `scrypt$${salt}$${hash}`
+}
+
+const verifyPassword = (password, storedHash) => {
+  const [algorithm, salt, expectedHash] = String(storedHash || '').split('$')
+  if (algorithm === 'scrypt' && salt && expectedHash) {
+    const actualHash = crypto.scryptSync(String(password), salt, 64)
+    const expected = Buffer.from(expectedHash, 'hex')
+    return expected.length === actualHash.length && crypto.timingSafeEqual(actualHash, expected)
+  }
+
+  const legacyHash = crypto.createHash('sha256').update(String(password)).digest()
+  const expectedLegacyHash = Buffer.from(String(storedHash || ''), 'hex')
+  return expectedLegacyHash.length === legacyHash.length && crypto.timingSafeEqual(legacyHash, expectedLegacyHash)
+}
 
 const imageData = (dataUrl) => {
   const match = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
@@ -112,29 +141,60 @@ const distanceKm = (lat1, lng1, lat2, lng2) => {
   return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-const run = (sql, params = []) =>
-  new Promise((resolve, reject) => {
+const waitForTransaction = () => transactionContext.getStore() ? Promise.resolve() : transactionQueue
+
+const run = async (sql, params = []) => {
+  await waitForTransaction()
+  return new Promise((resolve, reject) => {
     db.run(sql, params, function onRun(err) {
       if (err) return reject(err)
       resolve({ id: this.lastID, changes: this.changes })
     })
   })
+}
 
-const get = (sql, params = []) =>
-  new Promise((resolve, reject) => {
+const get = async (sql, params = []) => {
+  await waitForTransaction()
+  return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) return reject(err)
       resolve(row)
     })
   })
+}
 
-const all = (sql, params = []) =>
-  new Promise((resolve, reject) => {
+const all = async (sql, params = []) => {
+  await waitForTransaction()
+  return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
       if (err) return reject(err)
       resolve(rows)
     })
   })
+}
+
+const withTransaction = async (operation) => {
+  let release
+  const previousTransaction = transactionQueue
+  transactionQueue = new Promise((resolve) => { release = resolve })
+  await previousTransaction
+
+  try {
+    return await transactionContext.run(true, async () => {
+      await run('BEGIN IMMEDIATE')
+      try {
+        const result = await operation()
+        await run('COMMIT')
+        return result
+      } catch (error) {
+        await run('ROLLBACK')
+        throw error
+      }
+    })
+  } finally {
+    release()
+  }
+}
 
 const initializeDatabase = async () => {
   await new Promise((resolve, reject) => {
@@ -467,17 +527,111 @@ const initializeDatabase = async () => {
     await run('ALTER TABLE messages ADD COLUMN receiver_name TEXT')
   }
 
-  const adminExists = await get('SELECT id FROM users WHERE role = ?', ['admin'])
+  await run(`UPDATE delivery_addresses SET is_default = 0
+    WHERE is_default = 1 AND id NOT IN (
+      SELECT MIN(id) FROM delivery_addresses WHERE is_default = 1 GROUP BY user_id
+    )`)
+  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_addresses_one_default ON delivery_addresses(user_id) WHERE is_default = 1')
+
+  const adminExists = await get('SELECT id, password FROM users WHERE role = ?', ['admin'])
   if (!adminExists) {
     await run(
       `INSERT INTO users (role, name, email, phone, password) VALUES (?, ?, ?, ?, ?)`,
       [DEFAULT_ADMIN.role, DEFAULT_ADMIN.name, DEFAULT_ADMIN.email, DEFAULT_ADMIN.phone, hashPassword(DEFAULT_ADMIN.password)]
     )
+  } else {
+    const seededPasswordHash = crypto.createHash('sha256').update('admin123').digest('hex')
+    if (adminExists.password === seededPasswordHash) {
+      await run('UPDATE users SET password = ? WHERE id = ?', [hashPassword(DEFAULT_ADMIN.password), adminExists.id])
+    }
   }
 }
 
-const createToken = (user) =>
-  Buffer.from(JSON.stringify({ id: user.id, role: user.role, email: user.email, exp: Date.now() + 60 * 60 * 1000 })).toString('base64')
+const createToken = (user) => {
+  const payload = Buffer.from(JSON.stringify({ id: user.id, exp: Date.now() + 60 * 60 * 1000 })).toString('base64url')
+  const signature = crypto.createHmac('sha256', AUTH_TOKEN_SECRET).update(payload).digest('base64url')
+  return `${payload}.${signature}`
+}
+
+const authenticateRequest = async (req, res, next) => {
+  const token = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]
+  if (!token) return res.status(401).json({ message: 'Authentication is required.' })
+
+  const [payload, signature] = token.split('.')
+  if (!payload || !signature) return res.status(401).json({ message: 'Invalid or expired session.' })
+
+  const expectedSignature = crypto.createHmac('sha256', AUTH_TOKEN_SECRET).update(payload).digest()
+  const receivedSignature = Buffer.from(signature, 'base64url')
+  if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(receivedSignature, expectedSignature)) {
+    return res.status(401).json({ message: 'Invalid or expired session.' })
+  }
+
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!Number.isInteger(Number(claims.id)) || Number(claims.exp) <= Date.now()) {
+      return res.status(401).json({ message: 'Invalid or expired session.' })
+    }
+
+    const user = await get('SELECT id, role, name, account_status FROM users WHERE id = ?', [claims.id])
+    if (!user || user.account_status === 'suspended') {
+      return res.status(401).json({ message: 'This account is unavailable.' })
+    }
+
+    req.auth = { id: Number(user.id), role: user.role, name: user.name }
+    next()
+  } catch (error) {
+    console.error('Authentication error:', error)
+    res.status(401).json({ message: 'Invalid or expired session.' })
+  }
+}
+
+const requireRoles = (...roles) => (req, res, next) => {
+  if (!req.auth || !roles.includes(req.auth.role)) {
+    return res.status(403).json({ message: 'You are not authorized to perform this action.' })
+  }
+  next()
+}
+
+const requireUserAccess = (parameter = 'id') => (req, res, next) => {
+  if (req.auth.role !== 'admin' && Number(req.params[parameter]) !== req.auth.id) {
+    return res.status(403).json({ message: 'You can access only your own account.' })
+  }
+  next()
+}
+
+const requireMarketplaceProfileAccess = async (req, res, next) => {
+  const requestedId = Number(req.params.id)
+  if (req.auth.role === 'admin' || requestedId === req.auth.id) return next()
+  if (req.auth.role !== 'consumer') {
+    return res.status(403).json({ message: 'You can access only your own account.' })
+  }
+
+  try {
+    const user = await get('SELECT role FROM users WHERE id = ?', [requestedId])
+    if (!user || !['farmer', 'delivery'].includes(user.role)) {
+      return res.status(403).json({ message: 'This profile is not available.' })
+    }
+    next()
+  } catch (error) {
+    console.error('Marketplace profile access error:', error)
+    res.status(500).json({ message: 'Unable to check profile access right now.' })
+  }
+}
+
+const requireProductAccess = async (req, res, next) => {
+  if (req.auth.role === 'admin') return next()
+  try {
+    const product = await get('SELECT farmer_id FROM products WHERE id = ?', [req.params.id])
+    if (!product) return res.status(404).json({ message: 'Product not found.' })
+    if (req.auth.role !== 'farmer' || Number(product.farmer_id) !== req.auth.id) {
+      return res.status(403).json({ message: 'You can manage only your own products.' })
+    }
+    next()
+  } catch (error) {
+    console.error('Product access error:', error)
+    res.status(500).json({ message: 'Unable to check product access right now.' })
+  }
+}
 
 const getSafeUser = (user) => ({
   id: user.id,
@@ -503,7 +657,7 @@ const getSafeUser = (user) => ({
   landmark: user.landmark,
   state: user.state,
   pincode: user.pincode,
-  certificateStatus: user.certificate_review_status ?? user.certificate_status ?? user.certificateStatus ?? 'pending',
+  certificateStatus: user.certificate_review_status || (user.role === 'farmer' && user.certificate_status === 'pending' ? 'not_uploaded' : user.certificate_status ?? user.certificateStatus ?? 'pending'),
   rating: Number(user.rating ?? 0),
   reviewCount: Number(user.review_count ?? 0),
   drivingLicenseNumber: user.driving_license_number ?? user.drivingLicenseNumber,
@@ -533,17 +687,40 @@ app.use((err, req, res, next) => {
   next(err)
 })
 
+app.use('/api', (req, res, next) => {
+  const publicRoute = req.method === 'GET' && (
+    req.path === '/health' ||
+    req.path === '/market/prices' ||
+    req.path === '/reviews' ||
+    /^\/products(?:\/farmer\/\d+|\/\d+)?$/.test(req.path)
+  ) || (
+    req.method === 'POST' && ['/auth/register', '/auth/login', '/complaints'].includes(req.path)
+  )
+  const authenticationRoute = req.method === 'POST' && ['/auth/register', '/auth/login'].includes(req.path)
+
+  if (authenticationRoute) return next()
+  if (publicRoute) {
+    return req.headers.authorization ? authenticateRequest(req, res, next) : next()
+  }
+  return authenticateRequest(req, res, next)
+})
+
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, dbPath: DB_PATH })
+  res.json({ ok: true })
 })
 
 app.post('/api/complaints', async (req, res) => {
   try {
-    const { user_id, role, name, phone, subject, description } = req.body || {}
-    if (!role || !name?.trim() || !phone?.trim() || !subject?.trim() || !description?.trim()) {
+    const { role, name, phone, subject, description } = req.body || {}
+    if (!allowedRoles.includes(role) || typeof name !== 'string' || !name.trim() || typeof phone !== 'string' || !phone.trim() || typeof subject !== 'string' || !subject.trim() || typeof description !== 'string' || !description.trim()) {
       return res.status(400).json({ message: 'Name, phone, subject, and description are required.' })
     }
-    const result = await run('INSERT INTO complaints (user_id, role, name, phone, subject, description) VALUES (?, ?, ?, ?, ?, ?)', [user_id || null, role, name.trim(), phone.trim(), subject.trim(), description.trim()])
+    if (name.length > 120 || phone.length > 40 || subject.length > 160 || description.length > 5000) {
+      return res.status(400).json({ message: 'Support request fields exceed their allowed lengths.' })
+    }
+    const authenticatedUserId = req.auth?.id ?? null
+    const authenticatedRole = req.auth?.role ?? role
+    const result = await run('INSERT INTO complaints (user_id, role, name, phone, subject, description) VALUES (?, ?, ?, ?, ?, ?)', [authenticatedUserId, authenticatedRole, name.trim(), phone.trim(), subject.trim(), description.trim()])
     const complaint = await get('SELECT * FROM complaints WHERE id = ?', [result.id])
     res.status(201).json({ message: 'Support request submitted successfully.', complaint })
   } catch (error) {
@@ -552,7 +729,7 @@ app.post('/api/complaints', async (req, res) => {
   }
 })
 
-app.get('/api/admin/complaints', async (req, res) => {
+app.get('/api/admin/complaints', requireRoles('admin'), async (req, res) => {
   try {
     const complaints = await all('SELECT * FROM complaints ORDER BY created_at DESC, id DESC')
     res.json({ complaints })
@@ -566,12 +743,16 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { role, name, email, phone, password, lat, lng, address, city } = req.body || {}
 
-    if (!allowedRoles.includes(role)) {
+    if (!allowedRoles.includes(role) || role === 'admin') {
       return res.status(400).json({ message: 'Invalid role selected.' })
     }
 
-    if (!name || !email || !password) {
+    if (typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string' || !name.trim() || !email.trim() || !password) {
       return res.status(400).json({ message: 'Name, email, and password are required.' })
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters long.' })
     }
 
     if (role === 'admin') {
@@ -591,7 +772,9 @@ app.post('/api/auth/register', async (req, res) => {
       [role, name.trim(), email.trim().toLowerCase(), phone?.trim() || '', hashPassword(password), lat || null, lng || null, address || null, city || null]
     )
 
-    const createdUser = await get('SELECT id, role, name, email, phone, lat, lng, address, city, farm_name, description, avatar, certificate_status, rating, review_count, created_at FROM users WHERE id = ?', [insertResult.id])
+    const createdUser = await get(`SELECT id, role, name, email, phone, lat, lng, address, city, farm_name, description, avatar, certificate_status, rating, review_count,
+      (SELECT status FROM certificates WHERE farmer_id = users.id ORDER BY uploaded_at DESC, id DESC LIMIT 1) AS certificate_review_status,
+      created_at FROM users WHERE id = ?`, [insertResult.id])
 
     return res.status(201).json({
       message: 'Account created successfully.',
@@ -612,21 +795,30 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid role selected.' })
     }
 
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
       return res.status(400).json({ message: 'Email and password are required.' })
     }
 
     const user = await get(
-      'SELECT id, role, name, email, phone, password, lat, lng, address, city, farm_name, description, avatar, certificate_status, rating, review_count, created_at FROM users WHERE role = ? AND email = ?',
+      `SELECT id, role, name, email, phone, password, lat, lng, address, city, farm_name, description, avatar, certificate_status, rating, review_count, account_status,
+       (SELECT status FROM certificates WHERE farmer_id = users.id ORDER BY uploaded_at DESC, id DESC LIMIT 1) AS certificate_review_status,
+       created_at FROM users WHERE role = ? AND email = ?`,
       [role, String(email).trim().toLowerCase()]
     )
 
     if (!user) {
       return res.status(401).json({ message: 'No account found for this role and email.' })
     }
+    if (user.account_status === 'suspended') {
+      return res.status(403).json({ message: 'This account has been suspended. Contact support for help.' })
+    }
 
-    if (user.password !== hashPassword(password)) {
+    if (!verifyPassword(password, user.password)) {
       return res.status(401).json({ message: 'Incorrect password.' })
+    }
+
+    if (!String(user.password).startsWith('scrypt$')) {
+      await run('UPDATE users SET password = ? WHERE id = ?', [hashPassword(password), user.id])
     }
 
     return res.json({
@@ -640,7 +832,35 @@ app.post('/api/auth/login', async (req, res) => {
   }
 })
 
-app.get('/api/admin/users', async (req, res) => {
+app.get('/api/locations/farmers', requireRoles('consumer'), async (req, res) => {
+  try {
+    const farmers = await all(
+      `SELECT id, name, farm_name, phone, lat, lng, address, city, state, pincode, certificate_status, rating
+       FROM users WHERE role = 'farmer' AND account_status != 'suspended'
+       ORDER BY name COLLATE NOCASE`
+    )
+    res.json({ farmers: farmers.map((farmer) => ({ ...farmer, name: farmer.farm_name || farmer.name, certificateStatus: farmer.certificate_status })) })
+  } catch (error) {
+    console.error('Farmer locations error:', error)
+    res.status(500).json({ message: 'Unable to fetch farmer locations right now.' })
+  }
+})
+
+app.get('/api/locations/delivery', requireRoles('farmer'), async (req, res) => {
+  try {
+    const agents = await all(
+      `SELECT id, name, phone, lat, lng, account_status, availability_status
+       FROM users WHERE role = 'delivery' AND account_status != 'suspended'
+       ORDER BY name COLLATE NOCASE`
+    )
+    res.json({ agents })
+  } catch (error) {
+    console.error('Delivery locations error:', error)
+    res.status(500).json({ message: 'Unable to fetch delivery partner locations right now.' })
+  }
+})
+
+app.get('/api/admin/users', requireRoles('admin'), async (req, res) => {
   try {
     const users = await all(
             `SELECT u.id, u.role, u.name, u.email, u.phone, u.lat, u.lng, u.address, u.city, u.farm_name, u.description, u.avatar, u.certificate_status, u.rating, u.review_count, u.account_status,
@@ -664,14 +884,14 @@ app.get('/api/admin/users', async (req, res) => {
   }
 })
 
-app.get('/api/admin/stats', async (req, res) => {
+app.get('/api/admin/stats', requireRoles('admin'), async (req, res) => {
   try {
     const rows = await all('SELECT role, COUNT(*) AS count FROM users GROUP BY role')
     const orderRow = await get(`SELECT COUNT(*) AS totalOrders,
       SUM(CASE WHEN status IN ('completed', 'delivered') THEN 1 ELSE 0 END) AS completedOrders,
       SUM(CASE WHEN delivery_agent_id IS NOT NULL THEN 1 ELSE 0 END) AS totalDeliveries,
-      IFNULL(SUM(total), 0) AS revenue,
-      IFNULL(SUM(total), 0) AS totalPayments FROM orders`)
+      IFNULL(SUM(CASE WHEN status IN ('completed', 'delivered') THEN total ELSE 0 END), 0) AS revenue,
+      IFNULL(SUM(CASE WHEN payment_status = 'paid' THEN total ELSE 0 END), 0) AS totalPayments FROM orders`)
     const productRow = await get('SELECT COUNT(*) AS totalProducts FROM products')
     const verifiedFarmerRow = await get("SELECT COUNT(*) AS verifiedFarmers FROM users WHERE role = 'farmer' AND certificate_status = 'verified'")
     const verificationRow = await get("SELECT COUNT(*) AS pendingVerifications FROM users WHERE role = 'farmer' AND certificate_status IN ('pending', 'rejected')")
@@ -719,7 +939,7 @@ app.get('/api/market/prices', async (req, res) => {
 // Products API endpoints
 app.get('/api/products', async (req, res) => {
   try {
-    const includeUnavailable = req.query.includeUnavailable === 'true'
+    const includeUnavailable = req.query.includeUnavailable === 'true' && ['consumer', 'admin'].includes(req.auth?.role)
     const products = await all(
       `SELECT p.id, p.farmer_id, p.farmer_name, p.name, p.description, p.price, p.recommended_price, p.image,
               p.category, p.harvest_date, p.quantity, p.unit, p.available,
@@ -731,6 +951,12 @@ app.get('/api/products', async (req, res) => {
        LEFT JOIN users u ON u.id = p.farmer_id
        ${includeUnavailable ? '' : 'WHERE p.available = 1'} ORDER BY p.created_at DESC`
     )
+    if (!req.auth) products.forEach((product) => {
+      delete product.farmer_phone
+      delete product.farmer_lat
+      delete product.farmer_lng
+      delete product.farmer_address
+    })
     res.json({ products })
   } catch (error) {
     console.error('Products fetch error:', error)
@@ -741,6 +967,7 @@ app.get('/api/products', async (req, res) => {
 app.get('/api/products/farmer/:farmerId', async (req, res) => {
   try {
     const { farmerId } = req.params
+    const canViewUnavailable = req.auth?.role === 'admin' || (req.auth?.role === 'farmer' && req.auth.id === Number(farmerId))
     const products = await all(
       `SELECT p.id, p.farmer_id, p.farmer_name, p.name, p.description, p.price, p.recommended_price, p.image,
           p.category, p.harvest_date, p.quantity, p.unit, p.available,
@@ -749,9 +976,15 @@ app.get('/api/products/farmer/:farmerId', async (req, res) => {
               u.phone AS farmer_phone, u.farm_name, u.address AS farmer_address, u.city AS farmer_city,
               u.certificate_status
        FROM products p LEFT JOIN users u ON u.id = p.farmer_id
-       WHERE p.farmer_id = ? ORDER BY p.created_at DESC`,
-      [farmerId]
+      WHERE p.farmer_id = ? AND (p.available = 1 OR ? = 1) ORDER BY p.created_at DESC`,
+          [farmerId, canViewUnavailable ? 1 : 0]
     )
+        if (!req.auth) products.forEach((product) => {
+          delete product.farmer_phone
+          delete product.farmer_lat
+          delete product.farmer_lng
+          delete product.farmer_address
+        })
     res.json({ products })
   } catch (error) {
     console.error('Farmer products fetch error:', error)
@@ -777,7 +1010,16 @@ app.get('/api/products/:id', async (req, res) => {
     if (!product) {
       return res.status(404).json({ message: 'Product not found.' })
     }
+    if (!product.available && req.auth?.role !== 'admin' && !(req.auth?.role === 'farmer' && req.auth.id === Number(product.farmer_id))) {
+      return res.status(404).json({ message: 'Product not found.' })
+    }
 
+    if (!req.auth) {
+      delete product.farmer_phone
+      delete product.farmer_lat
+      delete product.farmer_lng
+      delete product.farmer_address
+    }
     res.json({ product })
   } catch (error) {
     console.error('Product detail error:', error)
@@ -801,43 +1043,60 @@ app.get('/api/reviews', async (req, res) => {
 
 app.post('/api/reviews', async (req, res) => {
   try {
-    const { product_id, target_type = 'product', target_id, order_id, reviewer_role = 'consumer', user_id, user_name, rating, comment, image_url } = req.body || {}
+    const { product_id, target_type = 'product', target_id, order_id, rating, comment, image_url } = req.body || {}
     const targetId = Number(target_id ?? product_id)
     const normalizedOrderId = Number(order_id ?? 0)
     const numericRating = Number(rating)
     const reviewImage = typeof image_url === 'string' ? image_url.trim() : ''
     const sanitizedComment = typeof comment === 'string' ? comment.trim() : ''
 
-    if (!['product', 'farmer', 'delivery'].includes(target_type) || !targetId || !user_id || !user_name || !Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5) {
+    if (!['product', 'farmer', 'delivery'].includes(target_type) || !Number.isInteger(targetId) || targetId <= 0 || !Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5) {
       return res.status(400).json({ message: 'Review target, user, and rating are required.' })
+    }
+    if ((target_type === 'product' && req.auth.role !== 'consumer') || (target_type !== 'product' && !['consumer', 'farmer'].includes(req.auth.role))) {
+      return res.status(403).json({ message: 'Your account cannot submit this type of review.' })
     }
     if (target_type !== 'product' && !sanitizedComment) {
       return res.status(400).json({ message: 'Review text is required for farmer and delivery partner ratings.' })
+    }
+    if (reviewImage) {
+      const image = imageData(reviewImage)
+      if (!image || image.buffer.length > 4 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(image.mimeType)) {
+        return res.status(400).json({ message: 'Review photos must be JPEG, PNG, or WebP images no larger than 4 MB.' })
+      }
     }
 
     if (target_type === 'product') {
       const product = await get('SELECT id FROM products WHERE id = ?', [targetId])
       if (!product) return res.status(404).json({ message: 'Product not found.' })
+      const purchase = await get(
+        `SELECT o.id FROM orders o
+         JOIN order_items oi ON oi.order_id = o.id
+         WHERE o.consumer_id = ? AND oi.product_id = ? AND o.status IN ('completed', 'delivered')
+         LIMIT 1`,
+        [req.auth.id, targetId]
+      )
+      if (!purchase) return res.status(403).json({ message: 'You can review a product after a completed purchase.' })
     } else {
       const role = target_type === 'farmer' ? 'farmer' : 'delivery'
       const targetUser = await get('SELECT id FROM users WHERE id = ? AND role = ?', [targetId, role])
       if (!targetUser) return res.status(404).json({ message: 'Review target not found.' })
       if (!order_id) return res.status(400).json({ message: 'Order is required for profile reviews.' })
-      const order = reviewer_role === 'farmer'
-        ? await get('SELECT id FROM orders WHERE id = ? AND status IN (\'completed\', \'delivered\') AND farmer_id = ? AND delivery_agent_id = ?', [order_id, user_id, target_type === 'delivery' ? targetId : -1])
-        : await get('SELECT id FROM orders WHERE id = ? AND status IN (\'completed\', \'delivered\') AND consumer_id = ? AND (farmer_id = ? OR delivery_agent_id = ?)', [order_id, user_id, target_type === 'farmer' ? targetId : -1, target_type === 'delivery' ? targetId : -1])
+      const order = req.auth.role === 'farmer'
+        ? await get('SELECT id FROM orders WHERE id = ? AND status IN (\'completed\', \'delivered\') AND farmer_id = ? AND delivery_agent_id = ?', [order_id, req.auth.id, target_type === 'delivery' ? targetId : -1])
+        : await get('SELECT id FROM orders WHERE id = ? AND status IN (\'completed\', \'delivered\') AND consumer_id = ? AND (farmer_id = ? OR delivery_agent_id = ?)', [order_id, req.auth.id, target_type === 'farmer' ? targetId : -1, target_type === 'delivery' ? targetId : -1])
       if (!order) return res.status(403).json({ message: 'You can review only a completed order you participated in.' })
     }
 
     const existing = target_type === 'product'
-      ? await get("SELECT id FROM reviews WHERE target_type = 'product' AND target_id = ? AND user_id = ?", [targetId, user_id])
-      : await get('SELECT id FROM reviews WHERE target_type = ? AND target_id = ? AND order_id = ? AND user_id = ?', [target_type, targetId, normalizedOrderId, user_id])
+      ? await get("SELECT id FROM reviews WHERE target_type = 'product' AND target_id = ? AND user_id = ?", [targetId, req.auth.id])
+      : await get('SELECT id FROM reviews WHERE target_type = ? AND target_id = ? AND order_id = ? AND user_id = ?', [target_type, targetId, normalizedOrderId, req.auth.id])
     if (existing) return res.status(409).json({ message: 'You have already submitted this review.' })
 
     const finalComment = target_type === 'product' ? (sanitizedComment || 'Product review') : sanitizedComment
     const result = await run(
       'INSERT INTO reviews (product_id, target_type, target_id, order_id, user_id, user_name, rating, comment, review_image) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [target_type === 'product' ? targetId : 0, target_type, targetId, target_type === 'product' ? 0 : normalizedOrderId, user_id, user_name.trim(), numericRating, finalComment, reviewImage || null]
+      [target_type === 'product' ? targetId : 0, target_type, targetId, target_type === 'product' ? 0 : normalizedOrderId, req.auth.id, req.auth.name, numericRating, finalComment, reviewImage || null]
     )
     const review = await get('SELECT * FROM reviews WHERE id = ?', [result.id])
     if (target_type === 'product') {
@@ -854,11 +1113,13 @@ app.post('/api/reviews', async (req, res) => {
   }
 })
 
-app.get('/api/users/:id', async (req, res) => {
+app.get('/api/users/:id', requireMarketplaceProfileAccess, async (req, res) => {
   try {
     const { id } = req.params
     const user = await get(
-      'SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, rating, review_count, created_at FROM users WHERE id = ?',
+      `SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, rating, review_count, aadhaar_number, aadhaar_status, driving_license_status, driving_license_number, vehicle_type, vehicle_number, availability_status,
+       (SELECT status FROM certificates WHERE farmer_id = users.id ORDER BY uploaded_at DESC, id DESC LIMIT 1) AS certificate_review_status,
+       created_at FROM users WHERE id = ?`,
       [id]
     )
 
@@ -866,14 +1127,30 @@ app.get('/api/users/:id', async (req, res) => {
       return res.status(404).json({ message: 'User not found.' })
     }
 
-    res.json({ user: getSafeUser(user) })
+    const safeUser = getSafeUser(user)
+    if (req.auth.role !== 'admin' && req.auth.id !== Number(id)) {
+      delete safeUser.lat
+      delete safeUser.lng
+      delete safeUser.address
+      delete safeUser.houseNumber
+      delete safeUser.floor
+      delete safeUser.buildingBlock
+      delete safeUser.landmark
+      delete safeUser.state
+      delete safeUser.pincode
+      delete safeUser.aadhaarNumber
+      delete safeUser.aadhaarStatus
+      delete safeUser.drivingLicenseNumber
+      delete safeUser.drivingLicenseStatus
+    }
+    res.json({ user: safeUser })
   } catch (error) {
     console.error('User profile error:', error)
     res.status(500).json({ message: 'Unable to fetch user profile right now.' })
   }
 })
 
-app.get('/api/delivery/nearby', async (req, res) => {
+app.get('/api/delivery/nearby', requireRoles('consumer', 'admin'), async (req, res) => {
   try {
     const { lat, lng } = req.query
     const centerLat = Number(lat)
@@ -888,7 +1165,8 @@ app.get('/api/delivery/nearby', async (req, res) => {
                 SELECT 1 FROM orders o
                 WHERE o.delivery_agent_id = u.id
                   AND o.status IN ('pickup', 'out_for_delivery')
-              ) THEN 'On delivery' ELSE 'Available' END AS delivery_status
+              ) THEN 'On delivery' ELSE 'Available' END AS delivery_status,
+              u.aadhaar_status, u.driving_license_status, u.availability_status
        FROM users u
        WHERE u.role = 'delivery' AND u.lat IS NOT NULL AND u.lng IS NOT NULL`
     )
@@ -897,8 +1175,10 @@ app.get('/api/delivery/nearby', async (req, res) => {
       .map((agent) => ({
         ...agent,
         distance: Math.round(distanceKm(centerLat, centerLng, agent.lat, agent.lng) * 10) / 10,
-        verified: true,
+        verified: agent.aadhaar_status === 'verified' && agent.driving_license_status === 'verified',
+        available: agent.availability_status !== 'unavailable',
       }))
+      .filter((agent) => agent.available)
       .filter((agent) => agent.distance <= 50)
       .sort((first, second) => first.distance - second.distance)
 
@@ -909,28 +1189,61 @@ app.get('/api/delivery/nearby', async (req, res) => {
   }
 })
 
-app.put('/api/users/:id/profile', async (req, res) => {
+app.put('/api/users/:id/profile', requireUserAccess(), async (req, res) => {
   try {
     const { id } = req.params
-    const { name, phone, email, address, city, lat, lng, farmName, description, avatar, drivingLicenseNumber, vehicleType, vehicleNumber, houseNumber, floor, buildingBlock, landmark, state, pincode } = req.body || {}
+    const body = req.body || {}
+    const currentUser = await get('SELECT name, phone FROM users WHERE id = ?', [id])
+    if (!currentUser) return res.status(404).json({ message: 'User not found.' })
 
-    if (!name?.trim() || !phone?.trim()) {
-      return res.status(400).json({ message: 'Farmer name and phone number are required.' })
+    const name = Object.hasOwn(body, 'name') ? body.name : currentUser.name
+    const phone = Object.hasOwn(body, 'phone') ? body.phone : currentUser.phone
+    if (typeof name !== 'string' || !name.trim() || typeof phone !== 'string' || !phone.trim()) {
+      return res.status(400).json({ message: 'Name and phone number are required.' })
     }
 
-    const updateResult = await run(
-      `UPDATE users
-        SET name = ?, phone = ?, email = ?, address = ?, city = ?, lat = ?, lng = ?, farm_name = ?, description = ?, avatar = ?, driving_license_number = ?, vehicle_type = ?, vehicle_number = ?, house_number = ?, floor = ?, building_block = ?, landmark = ?, state = ?, pincode = ?
-       WHERE id = ?`,
-          [name.trim(), phone.trim(), email?.trim() || '', address?.trim() || null, city?.trim() || null, lat || null, lng || null, farmName?.trim() || null, description?.trim() || null, avatar || null, drivingLicenseNumber?.trim() || null, vehicleType?.trim() || null, vehicleNumber?.trim() || null, houseNumber?.trim() || null, floor?.trim() || null, buildingBlock?.trim() || null, landmark?.trim() || null, state?.trim() || null, pincode?.trim() || null, id]
-    )
-
-    if (updateResult.changes === 0) {
-      return res.status(404).json({ message: 'User not found.' })
+    const fields = {
+      name: ['name', (value) => String(value).trim()],
+      phone: ['phone', (value) => String(value).trim()],
+      email: ['email', (value) => String(value).trim().toLowerCase()],
+      address: ['address', (value) => String(value).trim()],
+      city: ['city', (value) => String(value).trim()],
+      lat: ['lat', (value) => value == null || value === '' ? null : Number(value)],
+      lng: ['lng', (value) => value == null || value === '' ? null : Number(value)],
+      farmName: ['farm_name', (value) => String(value).trim()],
+      description: ['description', (value) => String(value).trim()],
+      avatar: ['avatar', (value) => value || null],
+      drivingLicenseNumber: ['driving_license_number', (value) => String(value).trim()],
+      vehicleType: ['vehicle_type', (value) => String(value).trim()],
+      vehicleNumber: ['vehicle_number', (value) => String(value).trim()],
+      houseNumber: ['house_number', (value) => String(value).trim()],
+      floor: ['floor', (value) => String(value).trim()],
+      buildingBlock: ['building_block', (value) => String(value).trim()],
+      landmark: ['landmark', (value) => String(value).trim()],
+      state: ['state', (value) => String(value).trim()],
+      pincode: ['pincode', (value) => String(value).trim()],
     }
+    const updates = Object.entries(fields)
+      .filter(([field]) => Object.hasOwn(body, field))
+      .map(([field, [column, normalize]]) => [column, normalize(body[field])])
+
+    if (!Object.hasOwn(body, 'name')) updates.push(['name', currentUser.name])
+    if (!Object.hasOwn(body, 'phone')) updates.push(['phone', currentUser.phone])
+    for (const coordinate of ['lat', 'lng']) {
+      const value = updates.find(([column]) => column === coordinate)?.[1]
+      if (value != null && (!Number.isFinite(value) || (coordinate === 'lat' ? Math.abs(value) > 90 : Math.abs(value) > 180))) {
+        return res.status(400).json({ message: 'Location coordinates are invalid.' })
+      }
+    }
+
+    const setClause = updates.map(([column]) => `${column} = ?`).join(', ')
+    const updateValues = updates.map(([, value]) => value)
+    await run(`UPDATE users SET ${setClause} WHERE id = ?`, [...updateValues, id])
 
     const user = await get(
-      'SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, rating, review_count, account_status, aadhaar_number, aadhaar_status, driving_license_status, availability_status, driving_license_number, vehicle_type, vehicle_number, created_at FROM users WHERE id = ?',
+      `SELECT id, role, name, email, phone, lat, lng, address, city, house_number, floor, building_block, landmark, state, pincode, farm_name, description, avatar, certificate_status, rating, review_count, account_status, aadhaar_number, aadhaar_status, driving_license_status, availability_status, driving_license_number, vehicle_type, vehicle_number,
+       (SELECT status FROM certificates WHERE farmer_id = users.id ORDER BY uploaded_at DESC, id DESC LIMIT 1) AS certificate_review_status,
+       created_at FROM users WHERE id = ?`,
       [id]
     )
     if (!user) return res.status(404).json({ message: 'User not found.' })
@@ -965,14 +1278,14 @@ async function syncUserDefaultAddress(userId, currentAddress) {
       defaultAddress.city || null,
       defaultAddress.state || null,
       defaultAddress.pincode || null,
-      defaultAddress.lat || null,
-      defaultAddress.lng || null,
+      defaultAddress.lat ?? null,
+      defaultAddress.lng ?? null,
       userId,
     ]
   )
 }
 
-app.get('/api/users/:id/addresses', async (req, res) => {
+app.get('/api/users/:id/addresses', requireUserAccess(), async (req, res) => {
   try {
     const addresses = await all('SELECT * FROM delivery_addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC', [req.params.id])
     res.json({ addresses })
@@ -982,19 +1295,29 @@ app.get('/api/users/:id/addresses', async (req, res) => {
   }
 })
 
-app.post('/api/users/:id/addresses', async (req, res) => {
+app.post('/api/users/:id/addresses', requireUserAccess(), async (req, res) => {
   try {
     const { label, address_line, landmark, city, state, pincode, lat, lng, is_default } = req.body || {}
-    if (!address_line?.trim() || !city?.trim()) return res.status(400).json({ message: 'Address line and city are required.' })
+    if (typeof address_line !== 'string' || !address_line.trim() || address_line.length > 1000 || typeof city !== 'string' || !city.trim()) {
+      return res.status(400).json({ message: 'A valid address line and city are required.' })
+    }
+    const addressLabel = typeof label === 'string' ? label.trim() : 'Home'
+    if (!addressLabels.has(addressLabel)) return res.status(400).json({ message: 'Address label must be Home, Work, or Other.' })
+    const hasCoordinates = lat != null && lng != null
+    if ((lat == null) !== (lng == null) || (hasCoordinates && (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng)) || Math.abs(Number(lat)) > 90 || Math.abs(Number(lng)) > 180))) {
+      return res.status(400).json({ message: 'Location coordinates are invalid.' })
+    }
 
-    if (is_default) {
+    const existingDefault = await get('SELECT id FROM delivery_addresses WHERE user_id = ? AND is_default = 1 LIMIT 1', [req.params.id])
+    const shouldBeDefault = is_default === true || !existingDefault
+    if (shouldBeDefault) {
       await run('UPDATE delivery_addresses SET is_default = 0 WHERE user_id = ?', [req.params.id])
     }
 
     const result = await run(
       `INSERT INTO delivery_addresses (user_id, label, address_line, landmark, city, state, pincode, lat, lng, is_default)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.params.id, label?.trim() || 'Home', address_line.trim(), landmark?.trim() || null, city.trim(), state?.trim() || null, pincode?.trim() || null, lat || null, lng || null, is_default ? 1 : 0]
+      [req.params.id, addressLabel, address_line.trim(), typeof landmark === 'string' ? landmark.trim() || null : null, city.trim(), typeof state === 'string' ? state.trim() || null : null, typeof pincode === 'string' ? pincode.trim() || null : null, hasCoordinates ? Number(lat) : null, hasCoordinates ? Number(lng) : null, shouldBeDefault ? 1 : 0]
     )
     const address = await get('SELECT * FROM delivery_addresses WHERE id = ?', [result.id])
 
@@ -1009,16 +1332,49 @@ app.post('/api/users/:id/addresses', async (req, res) => {
   }
 })
 
-app.put('/api/users/:userId/addresses/:addressId/default', async (req, res) => {
+app.put('/api/users/:userId/addresses/:addressId', requireUserAccess('userId'), async (req, res) => {
   try {
-    const address = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
-    if (!address) return res.status(404).json({ message: 'Address not found.' })
+    const { label, address_line, landmark, city, state, pincode, lat, lng } = req.body || {}
+    const addressLabel = typeof label === 'string' ? label.trim() : ''
+    if (!addressLabels.has(addressLabel) || typeof address_line !== 'string' || !address_line.trim() || address_line.length > 1000 || typeof city !== 'string' || !city.trim()) {
+      return res.status(400).json({ message: 'A valid label, address line, and city are required.' })
+    }
+    const hasCoordinates = lat != null && lng != null
+    if ((lat == null) !== (lng == null) || (hasCoordinates && (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng)) || Math.abs(Number(lat)) > 90 || Math.abs(Number(lng)) > 180))) {
+      return res.status(400).json({ message: 'Location coordinates are invalid.' })
+    }
 
-    await run('UPDATE delivery_addresses SET is_default = 0 WHERE user_id = ?', [req.params.userId])
-    await run('UPDATE delivery_addresses SET is_default = 1 WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
-    await syncUserDefaultAddress(req.params.userId, address)
+    const updatedAddress = await withTransaction(async () => {
+      const existing = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+      if (!existing) return null
+      await run(
+        `UPDATE delivery_addresses SET label = ?, address_line = ?, landmark = ?, city = ?, state = ?, pincode = ?, lat = ?, lng = ?
+         WHERE id = ? AND user_id = ?`,
+        [addressLabel, address_line.trim(), typeof landmark === 'string' ? landmark.trim() || null : null, city.trim(), typeof state === 'string' ? state.trim() || null : null, typeof pincode === 'string' ? pincode.trim() || null : null, hasCoordinates ? Number(lat) : null, hasCoordinates ? Number(lng) : null, req.params.addressId, req.params.userId]
+      )
+      const result = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+      if (Number(result.is_default) === 1) await syncUserDefaultAddress(req.params.userId, result)
+      return result
+    })
+    if (!updatedAddress) return res.status(404).json({ message: 'Address not found.' })
+    res.json({ message: 'Address updated successfully.', address: updatedAddress })
+  } catch (error) {
+    console.error('Address update error:', error)
+    res.status(500).json({ message: 'Unable to update delivery address right now.' })
+  }
+})
 
-    const updatedAddress = await get('SELECT * FROM delivery_addresses WHERE id = ?', [req.params.addressId])
+app.put('/api/users/:userId/addresses/:addressId/default', requireUserAccess('userId'), async (req, res) => {
+  try {
+    const updatedAddress = await withTransaction(async () => {
+      const address = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+      if (!address) return null
+      await run('UPDATE delivery_addresses SET is_default = 0 WHERE user_id = ?', [req.params.userId])
+      await run('UPDATE delivery_addresses SET is_default = 1 WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+      await syncUserDefaultAddress(req.params.userId, address)
+      return get('SELECT * FROM delivery_addresses WHERE id = ?', [req.params.addressId])
+    })
+    if (!updatedAddress) return res.status(404).json({ message: 'Address not found.' })
     const user = await get('SELECT id, name, email, phone, lat, lng, address, city, pincode, state FROM users WHERE id = ?', [req.params.userId])
     res.json({ message: 'Default address updated.', address: updatedAddress, user: user || null })
   } catch (error) {
@@ -1027,24 +1383,25 @@ app.put('/api/users/:userId/addresses/:addressId/default', async (req, res) => {
   }
 })
 
-app.delete('/api/users/:userId/addresses/:addressId', async (req, res) => {
+app.delete('/api/users/:userId/addresses/:addressId', requireUserAccess('userId'), async (req, res) => {
   try {
-    const existing = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
-    if (!existing) return res.status(404).json({ message: 'Address not found.' })
+    const deleted = await withTransaction(async () => {
+      const existing = await get('SELECT * FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+      if (!existing) return false
 
-    const isDefault = Number(existing.is_default) === 1
-    const result = await run('DELETE FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
-    if (!result.changes) return res.status(404).json({ message: 'Address not found.' })
-
-    if (isDefault) {
-      const nextDefault = await get('SELECT * FROM delivery_addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC LIMIT 1', [req.params.userId])
-      if (nextDefault) {
-        await run('UPDATE delivery_addresses SET is_default = 1 WHERE id = ?', [nextDefault.id])
-        await syncUserDefaultAddress(req.params.userId, nextDefault)
-      } else {
-        await run('UPDATE users SET address = ?, city = ?, state = ?, pincode = ?, lat = ?, lng = ? WHERE id = ?', [null, null, null, null, null, null, req.params.userId])
+      await run('DELETE FROM delivery_addresses WHERE id = ? AND user_id = ?', [req.params.addressId, req.params.userId])
+      if (Number(existing.is_default) === 1) {
+        const nextDefault = await get('SELECT * FROM delivery_addresses WHERE user_id = ? ORDER BY created_at DESC LIMIT 1', [req.params.userId])
+        if (nextDefault) {
+          await run('UPDATE delivery_addresses SET is_default = 1 WHERE id = ?', [nextDefault.id])
+          await syncUserDefaultAddress(req.params.userId, nextDefault)
+        } else {
+          await run('UPDATE users SET address = ?, city = ?, state = ?, pincode = ?, lat = ?, lng = ? WHERE id = ?', [null, null, null, null, null, null, req.params.userId])
+        }
       }
-    }
+      return true
+    })
+    if (!deleted) return res.status(404).json({ message: 'Address not found.' })
 
     res.json({ message: 'Address removed successfully.' })
   } catch (error) {
@@ -1056,6 +1413,9 @@ app.delete('/api/users/:userId/addresses/:addressId', async (req, res) => {
 app.get('/api/certificates', async (req, res) => {
   try {
     const { farmerId } = req.query
+    if (req.auth.role !== 'admin' && (!farmerId || Number(farmerId) !== req.auth.id || req.auth.role !== 'farmer')) {
+      return res.status(403).json({ message: 'You can access only your own certificates.' })
+    }
     const certificates = farmerId
       ? await all('SELECT * FROM certificates WHERE farmer_id = ? ORDER BY uploaded_at DESC, id DESC', [farmerId])
       : await all('SELECT * FROM certificates ORDER BY uploaded_at DESC, id DESC')
@@ -1066,11 +1426,14 @@ app.get('/api/certificates', async (req, res) => {
   }
 })
 
-app.post('/api/certificates', async (req, res) => {
+app.post('/api/certificates', requireRoles('farmer'), async (req, res) => {
   try {
     const { farmer_id, farmer_name, certificate_number, type, document_url, expiry_date, ocr_text, extracted_name, extracted_certificate_number } = req.body || {}
     if (!farmer_id || !farmer_name?.trim() || !certificate_number?.trim() || !type?.trim() || !document_url) {
       return res.status(400).json({ message: 'Farmer name, certificate number, type, and image are required.' })
+    }
+    if (Number(farmer_id) !== req.auth.id) {
+      return res.status(403).json({ message: 'You can upload certificates only for your own account.' })
     }
     const image = imageData(document_url)
     if (!image) return res.status(400).json({ message: 'Certificate must be uploaded as an image.' })
@@ -1105,7 +1468,22 @@ app.post('/api/certificates', async (req, res) => {
   }
 })
 
-app.get('/api/certificates/:id/image', async (req, res) => {
+const requireCertificateAccess = async (req, res, next) => {
+  if (req.auth.role === 'admin') return next()
+  if (req.auth.role !== 'farmer') return res.status(403).json({ message: 'You cannot access certificate documents.' })
+  try {
+    const certificate = await get('SELECT farmer_id FROM certificates WHERE id = ?', [req.params.id])
+    if (!certificate || Number(certificate.farmer_id) !== req.auth.id) {
+      return res.status(404).json({ message: 'Certificate not found.' })
+    }
+    next()
+  } catch (error) {
+    console.error('Certificate access error:', error)
+    res.status(500).json({ message: 'Unable to check certificate access right now.' })
+  }
+}
+
+app.get('/api/certificates/:id/image', requireCertificateAccess, async (req, res) => {
   try {
     const certificate = await get('SELECT document_blob, document_mime_type FROM certificates WHERE id = ?', [req.params.id])
     if (!certificate?.document_blob) return res.status(404).json({ message: 'Certificate image not found.' })
@@ -1116,7 +1494,7 @@ app.get('/api/certificates/:id/image', async (req, res) => {
   }
 })
 
-app.get('/api/certificates/:id/download', async (req, res) => {
+app.get('/api/certificates/:id/download', requireCertificateAccess, async (req, res) => {
   try {
     const certificate = await get('SELECT document_blob, document_mime_type, certificate_number FROM certificates WHERE id = ?', [req.params.id])
     if (!certificate?.document_blob) return res.status(404).json({ message: 'Certificate image not found.' })
@@ -1129,7 +1507,7 @@ app.get('/api/certificates/:id/download', async (req, res) => {
   }
 })
 
-app.put('/api/certificates/:id/status', async (req, res) => {
+app.put('/api/certificates/:id/status', requireRoles('admin'), async (req, res) => {
   try {
     const { id } = req.params
     const { status, rejection_reason } = req.body || {}
@@ -1142,9 +1520,10 @@ app.put('/api/certificates/:id/status', async (req, res) => {
 
     await run(
       'UPDATE certificates SET status = ?, rejection_reason = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [status, rejection_reason?.trim() || null, status === 'rejected' ? id : id]
+      [status, typeof rejection_reason === 'string' ? rejection_reason.trim() || null : null, id]
     )
-    await run('UPDATE users SET certificate_status = ? WHERE id = ?', [status, certificate.farmer_id])
+    const latestCertificate = await get('SELECT status FROM certificates WHERE farmer_id = ? ORDER BY uploaded_at DESC, id DESC LIMIT 1', [certificate.farmer_id])
+    await run('UPDATE users SET certificate_status = ? WHERE id = ?', [latestCertificate?.status || 'pending', certificate.farmer_id])
     const updatedCertificate = await get('SELECT * FROM certificates WHERE id = ?', [id])
     res.json({ message: `Certificate ${status}.`, certificate: updatedCertificate })
   } catch (error) {
@@ -1153,7 +1532,7 @@ app.put('/api/certificates/:id/status', async (req, res) => {
   }
 })
 
-app.put('/api/admin/users/:id/status', async (req, res) => {
+app.put('/api/admin/users/:id/status', requireRoles('admin'), async (req, res) => {
   try {
     const { id } = req.params
     const { status } = req.body || {}
@@ -1166,7 +1545,12 @@ app.put('/api/admin/users/:id/status', async (req, res) => {
     if (user.role === 'admin') return res.status(403).json({ message: 'Cannot modify admin accounts.' })
 
     await run('UPDATE users SET account_status = ? WHERE id = ?', [status, id])
-    const updatedUser = await get('SELECT * FROM users WHERE id = ?', [id])
+    const updatedUser = await get(
+      `SELECT users.*,
+        (SELECT status FROM certificates WHERE farmer_id = users.id ORDER BY uploaded_at DESC, id DESC LIMIT 1) AS certificate_review_status
+       FROM users WHERE id = ?`,
+      [id]
+    )
     res.json({ message: `Account ${status}.`, user: getSafeUser(updatedUser) })
   } catch (error) {
     console.error('User status update error:', error)
@@ -1174,7 +1558,7 @@ app.put('/api/admin/users/:id/status', async (req, res) => {
   }
 })
 
-app.put('/api/admin/delivery-partners/:id/verification', async (req, res) => {
+app.put('/api/admin/delivery-partners/:id/verification', requireRoles('admin'), async (req, res) => {
   try {
     const { id } = req.params
     const { document, status } = req.body || {}
@@ -1199,14 +1583,10 @@ app.put('/api/admin/delivery-partners/:id/verification', async (req, res) => {
   }
 })
 
-app.get('/api/chat/contacts', async (req, res) => {
+app.get('/api/chat/contacts', requireRoles('farmer', 'consumer', 'delivery'), async (req, res) => {
   try {
-    const { userId, role } = req.query
-    if (!userId || !role) {
-      return res.status(400).json({ message: 'userId and role are required.' })
-    }
-
-    const parsedId = Number(userId)
+    const role = req.auth.role
+    const parsedId = req.auth.id
     const contacts = []
 
     const baseFields = 'u.id, u.role, u.name, u.email, u.phone, u.lat, u.lng, u.address, u.city'
@@ -1269,17 +1649,20 @@ app.get('/api/chat/contacts', async (req, res) => {
   }
 })
 
-app.post('/api/products', async (req, res) => {
+app.post('/api/products', requireRoles('farmer'), async (req, res) => {
   try {
-    const { farmer_id, farmer_name, name, description, price, recommended_price, image, category, harvest_date, quantity, unit, available } = req.body || {}
+    const { name, description, price, recommended_price, image, category, harvest_date, quantity, unit, available } = req.body || {}
 
-    if (!farmer_id || !name || !price || !quantity) {
+    if (typeof name !== 'string' || !name.trim() || name.length > 160 || !Number.isFinite(Number(price)) || Number(price) <= 0 || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
       return res.status(400).json({ message: 'Farmer ID, name, price, and quantity are required.' })
     }
 
+    const farmer = await get('SELECT name, farm_name FROM users WHERE id = ? AND role = ?', [req.auth.id, 'farmer'])
+    if (!farmer) return res.status(403).json({ message: 'Farmer account not found.' })
+
     const insertResult = await run(
       `INSERT INTO products (farmer_id, farmer_name, name, description, price, recommended_price, image, category, harvest_date, quantity, unit, available) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [farmer_id, farmer_name || 'Unknown Farm', name, description || '', price, recommended_price || null, image || null, category || 'General', harvest_date || null, quantity, unit || 'kg', available === false ? 0 : 1]
+      [req.auth.id, farmer.farm_name || farmer.name, name.trim(), typeof description === 'string' ? description.trim() : '', Number(price), Number(recommended_price) > 0 ? Number(recommended_price) : null, image || null, category || 'General', harvest_date || null, Number(quantity), unit || 'kg', available === false ? 0 : 1]
     )
 
     const createdProduct = await get('SELECT * FROM products WHERE id = ?', [insertResult.id])
@@ -1290,14 +1673,19 @@ app.post('/api/products', async (req, res) => {
   }
 })
 
-app.put('/api/products/:id', async (req, res) => {
+app.put('/api/products/:id', requireProductAccess, async (req, res) => {
   try {
     const { id } = req.params
     const { name, description, price, recommended_price, image, category, harvest_date, quantity, unit, available } = req.body || {}
+    const numericPrice = Number(price)
+    const numericQuantity = Number(quantity)
+    if (typeof name !== 'string' || !name.trim() || name.length > 160 || !Number.isFinite(numericPrice) || numericPrice <= 0 || !Number.isFinite(numericQuantity) || numericQuantity < 0 || typeof available !== 'boolean') {
+      return res.status(400).json({ message: 'Product name, positive price, valid stock quantity, and availability are required.' })
+    }
 
     const updateResult = await run(
       `UPDATE products SET name = ?, description = ?, price = ?, recommended_price = ?, image = ?, category = ?, harvest_date = ?, quantity = ?, unit = ?, available = ? WHERE id = ?`,
-      [name, description, price, recommended_price, image, category, harvest_date, quantity, unit, available ? 1 : 0, id]
+      [name.trim(), typeof description === 'string' ? description.trim() : '', numericPrice, Number(recommended_price) > 0 ? Number(recommended_price) : null, image || null, category || 'General', harvest_date || null, numericQuantity, unit || 'kg', available && numericQuantity > 0 ? 1 : 0, id]
     )
 
     if (updateResult.changes === 0) {
@@ -1312,7 +1700,7 @@ app.put('/api/products/:id', async (req, res) => {
   }
 })
 
-app.delete('/api/products/:id', async (req, res) => {
+app.delete('/api/products/:id', requireProductAccess, async (req, res) => {
   try {
     const { id } = req.params
     const deleteResult = await run('DELETE FROM products WHERE id = ?', [id])
@@ -1331,7 +1719,8 @@ app.delete('/api/products/:id', async (req, res) => {
 // Orders API endpoints
 app.get('/api/orders', async (req, res) => {
   try {
-    const { userId, role } = req.query
+    const userId = req.auth.id
+    const role = req.auth.role
     let orders = []
 
     if (role === 'consumer') {
@@ -1373,34 +1762,93 @@ app.get('/api/orders', async (req, res) => {
   }
 })
 
-app.post('/api/orders', async (req, res) => {
+app.post('/api/orders', requireRoles('consumer'), async (req, res) => {
   try {
-    const { consumer_id, consumer_name, farmer_id, farmer_name, items, total, address, payment_method, delivery_lat, delivery_lng } = req.body || {}
+    const { items, address, payment_method, delivery_lat, delivery_lng } = req.body || {}
 
-    if (!consumer_id || !farmer_id || !items || !total || !address) {
-      return res.status(400).json({ message: 'Consumer ID, farmer ID, items, total, and address are required.' })
+    if (!Array.isArray(items) || items.length === 0 || items.length > 100 || typeof address !== 'string' || !address.trim() || address.length > 1000) {
+      return res.status(400).json({ message: 'At least one product and a delivery address are required.' })
     }
 
-    const insertResult = await run(
-      `INSERT INTO orders (consumer_id, consumer_name, farmer_id, farmer_name, total, address, payment_method, delivery_lat, delivery_lng, expected_delivery_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [consumer_id, consumer_name, farmer_id, farmer_name, total, address, payment_method || null, delivery_lat ?? null, delivery_lng ?? null, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()]
-    )
+    if (payment_method && !['upi', 'cod'].includes(payment_method)) {
+      return res.status(400).json({ message: 'Unsupported payment method.' })
+    }
+    const hasDeliveryCoordinates = delivery_lat != null || delivery_lng != null
+    if (hasDeliveryCoordinates && (!Number.isFinite(Number(delivery_lat)) || !Number.isFinite(Number(delivery_lng)) || Math.abs(Number(delivery_lat)) > 90 || Math.abs(Number(delivery_lng)) > 180)) {
+      return res.status(400).json({ message: 'Delivery coordinates are invalid.' })
+    }
 
-    const orderId = insertResult.id
+    const quantitiesByProduct = new Map()
     for (const item of items) {
-      await run(
-        `INSERT INTO order_items (order_id, product_id, product_name, quantity, price, image) VALUES (?, ?, ?, ?, ?, ?)`,
-        [orderId, item.product_id, item.product_name, item.quantity, item.price, item.image || null]
-      )
+      const productId = Number(item?.product_id)
+      const quantity = Number(item?.quantity)
+      if (!Number.isInteger(productId) || productId <= 0 || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ message: 'Every order item must have a valid product and quantity.' })
+      }
+      quantitiesByProduct.set(productId, (quantitiesByProduct.get(productId) || 0) + quantity)
     }
 
-    const createdOrder = await get('SELECT * FROM orders WHERE id = ?', [orderId])
-    const orderItems = await all('SELECT * FROM order_items WHERE order_id = ?', [orderId])
-    const responseOrder = { ...createdOrder, items: orderItems }
+    const responseOrder = await withTransaction(async () => {
+      const fail = (statusCode, message) => {
+        const error = new Error(message)
+        error.statusCode = statusCode
+        throw error
+      }
+      const consumer = await get('SELECT name FROM users WHERE id = ? AND role = ?', [req.auth.id, 'consumer'])
+      if (!consumer) fail(403, 'Consumer account not found.')
+
+      const orderProducts = []
+      for (const [productId, quantity] of quantitiesByProduct) {
+        const product = await get(
+          `SELECT p.id, p.farmer_id, p.name, p.price, p.image, p.quantity, p.available,
+                  u.name AS account_name, u.farm_name, u.lat AS farmer_lat, u.lng AS farmer_lng
+           FROM products p JOIN users u ON u.id = p.farmer_id WHERE p.id = ?`,
+          [productId]
+        )
+        if (!product || !product.available) fail(409, 'A product in your cart is no longer available.')
+        if (quantity > Number(product.quantity)) fail(409, `${product.name} does not have enough stock for this order.`)
+        orderProducts.push({ ...product, order_quantity: quantity })
+      }
+
+      const farmerIds = [...new Set(orderProducts.map((product) => Number(product.farmer_id)))]
+      if (farmerIds.length !== 1) fail(400, 'All items in an order must come from the same farmer.')
+
+      const subtotal = orderProducts.reduce((sum, product) => sum + Number(product.price) * product.order_quantity, 0)
+      const farmer = orderProducts[0]
+      const distance = farmer.farmer_lat != null && farmer.farmer_lng != null && hasDeliveryCoordinates
+        ? distanceKm(Number(farmer.farmer_lat), Number(farmer.farmer_lng), Number(delivery_lat), Number(delivery_lng))
+        : 0
+      const deliveryFee = subtotal >= 499 ? 0 : distance <= 5 ? 25 : distance <= 15 ? 45 : distance <= 30 ? 70 : 95
+      const total = Number((subtotal + deliveryFee).toFixed(2))
+
+      const insertResult = await run(
+        `INSERT INTO orders (consumer_id, consumer_name, farmer_id, farmer_name, total, address, payment_method, delivery_lat, delivery_lng, expected_delivery_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.auth.id, consumer.name, farmer.farmer_id, farmer.farm_name || farmer.account_name, total, address.trim(), payment_method || null, hasDeliveryCoordinates ? Number(delivery_lat) : null, hasDeliveryCoordinates ? Number(delivery_lng) : null, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()]
+      )
+
+      const orderId = insertResult.id
+      for (const product of orderProducts) {
+        const stockUpdate = await run(
+          'UPDATE products SET quantity = quantity - ?, available = CASE WHEN quantity - ? <= 0 THEN 0 ELSE available END WHERE id = ? AND available = 1 AND quantity >= ?',
+          [product.order_quantity, product.order_quantity, product.id, product.order_quantity]
+        )
+        if (!stockUpdate.changes) fail(409, `${product.name} is no longer available in the requested quantity.`)
+        await run(
+          `INSERT INTO order_items (order_id, product_id, product_name, quantity, price, image) VALUES (?, ?, ?, ?, ?, ?)`,
+          [orderId, product.id, product.name, product.order_quantity, product.price, product.image || null]
+        )
+      }
+
+      const createdOrder = await get('SELECT * FROM orders WHERE id = ?', [orderId])
+      const orderItems = await all('SELECT * FROM order_items WHERE order_id = ?', [orderId])
+      return { ...createdOrder, items: orderItems }
+    })
 
     if (global.io) {
       try {
-        global.io.emit('order_created', responseOrder)
+        global.io.to(`user_${req.auth.id}`).emit('order_created', responseOrder)
+        global.io.to(`user_${responseOrder.farmer_id}`).emit('order_created', responseOrder)
+        global.io.to('role_admin').emit('order_created', responseOrder)
       } catch (e) {
         console.warn('Order created socket emit failed:', e)
       }
@@ -1409,6 +1857,7 @@ app.post('/api/orders', async (req, res) => {
     res.status(201).json({ message: 'Order created successfully.', order: responseOrder })
   } catch (error) {
     console.error('Order creation error:', error)
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message })
     res.status(500).json({ message: 'Unable to create order right now.' })
   }
 })
@@ -1416,29 +1865,81 @@ app.post('/api/orders', async (req, res) => {
 app.put('/api/orders/:id/status', async (req, res) => {
   try {
     const { id } = req.params
-    const { status, delivery_agent_id, delivery_agent_name, pickup_parcel_photo, delivery_parcel_photo } = req.body || {}
+    const { status, pickup_parcel_photo, delivery_parcel_photo } = req.body || {}
+    const allowedStatuses = ['accepted', 'cancelled', 'pickup', 'out_for_delivery', 'completed']
+    if (!allowedStatuses.includes(status)) return res.status(400).json({ message: 'Invalid order status.' })
 
-    let updateQuery = 'UPDATE orders SET status = ?, pickup_parcel_photo = COALESCE(?, pickup_parcel_photo), delivery_parcel_photo = COALESCE(?, delivery_parcel_photo), updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-    let params = [status, pickup_parcel_photo || null, delivery_parcel_photo || null, id]
-
-    if (delivery_agent_id) {
-      updateQuery = status === 'pickup'
-        ? 'UPDATE orders SET status = ?, delivery_agent_id = ?, delivery_agent_name = ?, pickup_parcel_photo = COALESCE(?, pickup_parcel_photo), delivery_parcel_photo = COALESCE(?, delivery_parcel_photo), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = "accepted" AND delivery_agent_id IS NULL'
-        : 'UPDATE orders SET status = ?, delivery_agent_id = ?, delivery_agent_name = ?, pickup_parcel_photo = COALESCE(?, pickup_parcel_photo), delivery_parcel_photo = COALESCE(?, delivery_parcel_photo), updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-      params = [status, delivery_agent_id, delivery_agent_name, pickup_parcel_photo || null, delivery_parcel_photo || null, id]
+    for (const photo of [pickup_parcel_photo, delivery_parcel_photo].filter(Boolean)) {
+      const image = imageData(photo)
+      if (!image || image.buffer.length > 4 * 1024 * 1024) {
+        return res.status(400).json({ message: 'Parcel photos must be valid images no larger than 4 MB.' })
+      }
     }
 
-    const updateResult = await run(updateQuery, params)
+    const order = await get('SELECT * FROM orders WHERE id = ?', [id])
+    if (!order) return res.status(404).json({ message: 'Order not found.' })
 
-    if (updateResult.changes === 0) {
-      return res.status(404).json({ message: 'Order not found.' })
+    let updateResult
+    const pickupPhoto = pickup_parcel_photo || null
+    const deliveryPhoto = delivery_parcel_photo || null
+    const farmerCanCancel = req.auth.role === 'farmer' && Number(order.farmer_id) === req.auth.id && order.status === 'pending' && status === 'cancelled'
+    const consumerCanCancel = req.auth.role === 'consumer' && Number(order.consumer_id) === req.auth.id && status === 'cancelled' && !['cancelled', 'completed', 'delivered'].includes(order.status)
+
+    if (farmerCanCancel || consumerCanCancel) {
+      updateResult = await withTransaction(async () => {
+        const ownerColumn = farmerCanCancel ? 'farmer_id' : 'consumer_id'
+        const transitioned = await run(
+          `UPDATE orders SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND ${ownerColumn} = ? AND status = ?`,
+          [id, req.auth.id, order.status]
+        )
+        if (!transitioned.changes) return transitioned
+        const orderedItems = await all('SELECT product_id, quantity FROM order_items WHERE order_id = ?', [id])
+        for (const item of orderedItems) {
+          await run(
+            'UPDATE products SET quantity = quantity + ?, available = CASE WHEN available = 0 THEN 1 ELSE available END WHERE id = ?',
+            [item.quantity, item.product_id]
+          )
+        }
+        return transitioned
+      })
+    } else if (req.auth.role === 'farmer' && Number(order.farmer_id) === req.auth.id && order.status === 'pending' && status === 'accepted') {
+      updateResult = await run(
+        'UPDATE orders SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND farmer_id = ? AND status = ?',
+        ['accepted', id, req.auth.id, 'pending']
+      )
+    } else if (req.auth.role === 'delivery' && status === 'pickup' && order.status === 'accepted' && order.delivery_agent_id == null) {
+      const agent = await get('SELECT name FROM users WHERE id = ? AND role = ?', [req.auth.id, 'delivery'])
+      updateResult = await run(
+        `UPDATE orders SET status = ?, delivery_agent_id = ?, delivery_agent_name = ?, pickup_parcel_photo = COALESCE(?, pickup_parcel_photo), updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND status = 'accepted' AND delivery_agent_id IS NULL`,
+        [status, req.auth.id, agent?.name || '', pickupPhoto, id]
+      )
+    } else if (req.auth.role === 'delivery' && Number(order.delivery_agent_id) === req.auth.id && order.status === 'pickup' && status === 'out_for_delivery') {
+      updateResult = await run(
+        `UPDATE orders SET status = ?, pickup_parcel_photo = COALESCE(?, pickup_parcel_photo), updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND delivery_agent_id = ? AND status = 'pickup'`,
+        [status, pickupPhoto, id, req.auth.id]
+      )
+    } else if (req.auth.role === 'delivery' && Number(order.delivery_agent_id) === req.auth.id && order.status === 'out_for_delivery' && status === 'completed') {
+      updateResult = await run(
+        `UPDATE orders SET status = ?, delivery_parcel_photo = COALESCE(?, delivery_parcel_photo), updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND delivery_agent_id = ? AND status = 'out_for_delivery'`,
+        [status, deliveryPhoto, id, req.auth.id]
+      )
+    } else {
+      return res.status(403).json({ message: 'This status change is not allowed for your account or the current order state.' })
     }
+
+    if (updateResult.changes === 0) return res.status(409).json({ message: 'The order has changed. Refresh and try again.' })
 
     const updatedOrder = await get('SELECT * FROM orders WHERE id = ?', [id])
     if (global.io) {
       try {
-        global.io.emit('order_updated', updatedOrder)
-        if (status === 'accepted' && !delivery_agent_id) {
+        global.io.to(`user_${updatedOrder.consumer_id}`).emit('order_updated', updatedOrder)
+        global.io.to(`user_${updatedOrder.farmer_id}`).emit('order_updated', updatedOrder)
+        if (updatedOrder.delivery_agent_id) global.io.to(`user_${updatedOrder.delivery_agent_id}`).emit('order_updated', updatedOrder)
+        global.io.to('role_admin').emit('order_updated', updatedOrder)
+        if (status === 'accepted') {
           const farmer = await get('SELECT lat, lng FROM users WHERE id = ?', [updatedOrder.farmer_id])
           const deliveryAgents = await all('SELECT id, lat, lng FROM users WHERE role = ?', ['delivery'])
           const nearbyAgents = farmer?.lat != null && farmer?.lng != null
@@ -1462,16 +1963,14 @@ app.put('/api/orders/:id/status', async (req, res) => {
 })
 
 // Messages API endpoints
-app.get('/api/messages', async (req, res) => {
+app.get('/api/messages', requireRoles('farmer', 'consumer', 'delivery'), async (req, res) => {
   try {
-    const { userId, contactId } = req.query
-
-    if (!userId) {
-      return res.status(400).json({ message: 'userId is required.' })
-    }
-
-    const parsedUser = Number(userId)
+    const { contactId } = req.query
+    const parsedUser = req.auth.id
     const parsedContact = contactId ? Number(contactId) : null
+    if (parsedContact !== null && (!Number.isInteger(parsedContact) || parsedContact <= 0)) {
+      return res.status(400).json({ message: 'A valid contactId is required.' })
+    }
     const messages = parsedContact
       ? await all(
           `SELECT * FROM messages
@@ -1491,25 +1990,40 @@ app.get('/api/messages', async (req, res) => {
   }
 })
 
-app.post('/api/messages', async (req, res) => {
+app.post('/api/messages', requireRoles('farmer', 'consumer', 'delivery'), async (req, res) => {
   try {
-    const { sender_id, sender_name, receiver_id, receiver_name, content, type } = req.body || {}
-
-    if (!sender_id || !receiver_id || !content) {
-      return res.status(400).json({ message: 'Sender ID, receiver ID, and content are required.' })
+    const { receiver_id, content, type = 'text' } = req.body || {}
+    const recipientId = Number(receiver_id)
+    const normalizedContent = typeof content === 'string' ? content.trim() : ''
+    if (!Number.isInteger(recipientId) || recipientId <= 0 || !normalizedContent || normalizedContent.length > 4000 || !['text', 'callback_request'].includes(type)) {
+      return res.status(400).json({ message: 'A valid recipient and message of up to 4000 characters are required.' })
     }
+
+    const recipient = await get('SELECT id, role, name FROM users WHERE id = ?', [recipientId])
+    if (!recipient || recipient.id === req.auth.id) return res.status(404).json({ message: 'Chat contact not found.' })
+    let allowedContact = false
+    if (req.auth.role === 'farmer' && recipient.role === 'delivery') allowedContact = true
+    else if (req.auth.role === 'farmer' && recipient.role === 'consumer') {
+      allowedContact = Boolean(await get('SELECT id FROM orders WHERE farmer_id = ? AND consumer_id = ? LIMIT 1', [req.auth.id, recipientId]))
+    } else if (req.auth.role === 'consumer' && ['farmer', 'delivery'].includes(recipient.role)) {
+      allowedContact = Boolean(await get('SELECT id FROM orders WHERE consumer_id = ? AND (farmer_id = ? OR delivery_agent_id = ?) LIMIT 1', [req.auth.id, recipientId, recipientId]))
+    } else if (req.auth.role === 'delivery' && ['farmer', 'consumer'].includes(recipient.role)) {
+      const participantColumn = recipient.role === 'farmer' ? 'farmer_id' : 'consumer_id'
+      allowedContact = Boolean(await get(`SELECT id FROM orders WHERE delivery_agent_id = ? AND ${participantColumn} = ? LIMIT 1`, [req.auth.id, recipientId]))
+    }
+    if (!allowedContact) return res.status(403).json({ message: 'You cannot message this account.' })
 
     const insertResult = await run(
       `INSERT INTO messages (sender_id, sender_name, receiver_id, receiver_name, content, type) VALUES (?, ?, ?, ?, ?, ?)`,
-      [sender_id, sender_name || 'Unknown', receiver_id, receiver_name || '', content, type || 'text']
+      [req.auth.id, req.auth.name, recipientId, recipient.name, normalizedContent, type]
     )
 
     const createdMessage = await get('SELECT * FROM messages WHERE id = ?', [insertResult.id])
     if (global.io) {
       try {
-        global.io.to(`user_${sender_id}`).emit('new_message', createdMessage)
-        if (sender_id !== receiver_id) {
-          global.io.to(`user_${receiver_id}`).emit('new_message', createdMessage)
+        global.io.to(`user_${req.auth.id}`).emit('new_message', createdMessage)
+        if (req.auth.id !== recipientId) {
+          global.io.to(`user_${recipientId}`).emit('new_message', createdMessage)
         }
       } catch (e) {
         console.warn('Socket emit failed:', e)
@@ -1523,12 +2037,10 @@ app.post('/api/messages', async (req, res) => {
   }
 })
 
-app.put('/api/messages/:id/read', async (req, res) => {
+app.put('/api/messages/:id/read', requireRoles('farmer', 'consumer', 'delivery'), async (req, res) => {
   try {
     const { id } = req.params
-    const userId = Number(req.body?.userId)
-    if (!Number.isFinite(userId)) return res.status(400).json({ message: 'userId is required.' })
-    const updateResult = await run('UPDATE messages SET read = 1 WHERE id = ? AND receiver_id = ?', [id, userId])
+    const updateResult = await run('UPDATE messages SET read = 1 WHERE id = ? AND receiver_id = ?', [id, req.auth.id])
 
     if (updateResult.changes === 0) {
       return res.status(404).json({ message: 'Message not found.' })
@@ -1558,24 +2070,34 @@ await exportCertificateImages()
 const httpServer = http.createServer(app)
 const io = new IOServer(httpServer, { cors: { origin: '*' } })
 
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token
+    if (typeof token !== 'string') return next(new Error('Authentication required.'))
+    const [payload, signature] = token.split('.')
+    if (!payload || !signature) return next(new Error('Invalid session.'))
+
+    const expectedSignature = crypto.createHmac('sha256', AUTH_TOKEN_SECRET).update(payload).digest()
+    const receivedSignature = Buffer.from(signature, 'base64url')
+    if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(receivedSignature, expectedSignature)) {
+      return next(new Error('Invalid session.'))
+    }
+
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!Number.isInteger(Number(claims.id)) || Number(claims.exp) <= Date.now()) return next(new Error('Session expired.'))
+    const user = await get('SELECT id, role, account_status FROM users WHERE id = ?', [claims.id])
+    if (!user || user.account_status === 'suspended') return next(new Error('Account unavailable.'))
+    socket.data.auth = { id: Number(user.id), role: user.role }
+    next()
+  } catch (error) {
+    next(new Error('Invalid session.'))
+  }
+})
+
 io.on('connection', (socket) => {
   try {
-    console.log('[IO] client connected', socket.id)
-
-    socket.on('join', (userId) => {
-      try {
-        socket.join(`user_${userId}`)
-        console.log(`[IO] socket ${socket.id} joined user_${userId}`)
-      } catch (e) {}
-    })
-
-    socket.on('leave', (userId) => {
-      try {
-        socket.leave(`user_${userId}`)
-      } catch (e) {}
-    })
-
-    socket.on('disconnect', () => console.log('[IO] client disconnected', socket.id))
+    socket.join(`user_${socket.data.auth.id}`)
+    socket.join(`role_${socket.data.auth.role}`)
   } catch (e) {}
 })
 
@@ -1584,5 +2106,5 @@ global.io = io
 
 httpServer.listen(PORT, () => {
   console.log(`FarmDirect auth server listening on http://localhost:${PORT}`)
-  console.log(`Default admin account: ${DEFAULT_ADMIN.email} / ${DEFAULT_ADMIN.password}`)
+  console.log(`Default admin account configured: ${DEFAULT_ADMIN.email}`)
 })

@@ -376,14 +376,22 @@ npm run preview
 
 ## Default Admin Account
 
-When the backend starts for the first time, it creates a default admin record if one is missing:
+For local development, the backend creates a default admin record if one is missing:
 
 ```text
 Email: admin@farmdirect.local
 Password: admin123
 ```
 
-It is recommended to change this before deploying the app to production.
+This credential is development-only. Production startup requires both `ADMIN_PASSWORD` and `FARMDIRECT_AUTH_SECRET`. Set them in the server process environment before starting the backend; the seeded `admin123` password hash is migrated once to the configured password.
+
+Example PowerShell setup:
+
+```powershell
+$env:ADMIN_PASSWORD = "use-a-unique-strong-password"
+$env:FARMDIRECT_AUTH_SECRET = "use-a-long-random-secret-value"
+npm run dev:server
+```
 
 ## Project Notes
 
@@ -396,9 +404,7 @@ It is recommended to change this before deploying the app to production.
 
 Before using this in a production environment:
 
-- rotate or replace default admin credentials
-- secure admin API routes
-- review authentication and role checks
+- configure unique `ADMIN_PASSWORD` and `FARMDIRECT_AUTH_SECRET` values
 - use HTTPS and proper hosting
 - consider a stronger database system for large-scale deployment
 - back up SQLite data regularly

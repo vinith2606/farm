@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/Input'
 import { useAuth } from '@/context/AppContext'
 import { useToast } from '@/context/ToastContext'
 import api from '@/services/api'
-import { getCurrentLocation, reverseGeocode } from '@/utils/locationService'
+import { requestCurrentLocation, reverseGeocode } from '@/utils/locationService'
 
 export default function DeliveryProfile() {
   const { t } = useTranslation()
@@ -59,12 +59,18 @@ export default function DeliveryProfile() {
 
   const useLocation = async () => {
     setLocating(true)
-    const coords = await getCurrentLocation()
-    const location = await reverseGeocode(coords)
-    setCoordinates(coords)
-    setAddress(location.address)
-    setCity(location.city)
-    setLocating(false)
+    setError('')
+    try {
+      const coords = await requestCurrentLocation()
+      const location = await reverseGeocode(coords)
+      setCoordinates(coords)
+      setAddress([location.address, location.area].filter(Boolean).join(', '))
+      setCity(location.city)
+    } catch {
+      setError('Unable to access your current location. Check browser location permissions and try again.')
+    } finally {
+      setLocating(false)
+    }
   }
 
   const save = async () => {
@@ -75,9 +81,10 @@ export default function DeliveryProfile() {
     setSaving(true)
     setError('')
     try {
-      const response = await api.put(`/users/${userId}/profile`, { name, email, phone, avatar, address, city, lat: coordinates.lat || null, lng: coordinates.lng || null, drivingLicenseNumber: license, vehicleType, vehicleNumber })
+      const hasCoordinates = coordinates.lat !== 0 || coordinates.lng !== 0
+      const response = await api.put(`/users/${userId}/profile`, { name, email, phone, avatar, address, city, lat: hasCoordinates ? coordinates.lat : null, lng: hasCoordinates ? coordinates.lng : null, drivingLicenseNumber: license, vehicleType, vehicleNumber })
       const user = response.data.user
-      updateProfile(user.name, { id: String(user.id), email: user.email || '', phone: user.phone || '', avatar: user.avatar || '', location: user.lat && user.lng ? { lat: user.lat, lng: user.lng, address: user.address || '', city: user.city || '' } : undefined })
+      updateProfile(user.name, { id: String(user.id), email: user.email || '', phone: user.phone || '', avatar: user.avatar || '', location: user.lat != null && user.lng != null ? { lat: user.lat, lng: user.lng, address: user.address || '', city: user.city || '' } : undefined })
       toast('Delivery profile saved successfully.', 'success')
     } catch (saveError: any) {
       setError(saveError?.response?.data?.message || 'Unable to save delivery profile right now.')

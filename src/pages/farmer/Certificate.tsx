@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/Input'
 export default function FarmerCertificate() {
   const { t } = useTranslation()
   const { toast } = useToast()
-  const { userId, userName, certificateStatus } = useAuth()
+  const { userId, userName, certificateStatus, updateProfile } = useAuth()
   const navigate = useNavigate()
   const [certificate, setCertificate] = useState<any>(null)
   const [farmerName, setFarmerName] = useState(userName)
@@ -111,6 +111,7 @@ export default function FarmerCertificate() {
         extracted_certificate_number: extractedCertificateNumber,
       })
       setCertificate(response.data.certificate)
+      updateProfile(userName, { certificateStatus: response.data.certificate?.status || 'pending' })
       setFile('')
       toast(t('toast.certUploaded'), 'success')
     } catch (uploadError: any) {
@@ -128,7 +129,7 @@ export default function FarmerCertificate() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h2 className="font-semibold">{t('farmer.verificationStatus')}</h2>
-            <CertificateBadge status={certificate?.status || 'pending'} />
+            <CertificateBadge status={certificate?.status || certificateStatus} />
           </div>
           <Clock className="w-12 h-12 text-accent" />
         </div>
@@ -165,7 +166,7 @@ export default function FarmerCertificate() {
           <div><p className="text-muted">Type</p><p className="font-medium">{certificate?.type || '—'}</p></div>
           <div><p className="text-muted">Expiry</p><p className="font-medium">{certificate?.expiry_date || '—'}</p></div>
           <div><p className="text-muted">Review</p><p className="font-medium">{certificate?.rejection_reason || 'Waiting for admin review'}</p></div>
-          <div><p className="text-muted">Status</p><CertificateBadge status={certificate?.status || 'pending'} /></div>
+          <div><p className="text-muted">Status</p><CertificateBadge status={certificate?.status || certificateStatus} /></div>
         </div>
       </Card>
     </div>

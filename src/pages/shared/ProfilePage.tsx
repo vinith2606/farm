@@ -44,7 +44,7 @@ export default function ProfilePage({ role: _role }: { role: UserRole }) {
           description: user.description || '',
           avatar: user.avatar || '',
           certificateStatus: user.certificateStatus || 'pending',
-          location: user.lat && user.lng ? { lat: user.lat, lng: user.lng, address: user.address || '', city: user.city || '' } : undefined,
+          location: user.lat != null && user.lng != null ? { lat: user.lat, lng: user.lng, address: user.address || '', city: user.city || '' } : undefined,
         })
       })
       .catch(() => {})
@@ -85,7 +85,7 @@ export default function ProfilePage({ role: _role }: { role: UserRole }) {
           farmName: savedUser.farmName || '',
           description: savedUser.description || '',
           avatar: savedUser.avatar || '',
-          location: savedUser.lat && savedUser.lng ? {
+          location: savedUser.lat != null && savedUser.lng != null ? {
             lat: savedUser.lat,
             lng: savedUser.lng,
             address: savedUser.address || '',
@@ -183,10 +183,10 @@ export default function ProfilePage({ role: _role }: { role: UserRole }) {
   )
 }
 
-function CertificateBadgeForStatus({ status }: { status: 'verified' | 'pending' | 'rejected' | 'expired' }) {
+function CertificateBadgeForStatus({ status }: { status: 'verified' | 'pending' | 'rejected' | 'expired' | 'not_uploaded' }) {
   const { t } = useTranslation()
-  const labels = { verified: `✓ ${t('common.verified')}`, pending: `⏳ ${t('farmer.kanban.pending')}`, rejected: `✗ ${t('common.reject')}`, expired: `⚠ ${t('common.warning')}` }
-  const variants = { verified: 'success', pending: 'warning', rejected: 'danger', expired: 'warning' } as const
+  const labels = { verified: `✓ ${t('common.verified')}`, pending: 'Pending review', rejected: `✗ ${t('common.reject')}`, expired: `⚠ ${t('common.warning')}`, not_uploaded: 'Not uploaded' }
+  const variants = { verified: 'success', pending: 'warning', rejected: 'danger', expired: 'warning', not_uploaded: 'default' } as const
   return <Badge variant={variants[status]} className="mt-2">{labels[status]}</Badge>
 }
 

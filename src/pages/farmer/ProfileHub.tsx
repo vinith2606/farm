@@ -18,7 +18,7 @@ export default function FarmerProfileHub() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { userName, userEmail, userAvatar, certificateStatus, logout } = useAuth()
-  const certificateLabel = certificateStatus === 'verified' ? t('common.verified') : certificateStatus === 'rejected' ? 'Rejected' : certificateStatus === 'expired' ? 'Expired' : 'Not uploaded'
+  const certificateLabel = certificateStatus === 'verified' ? t('common.verified') : certificateStatus === 'rejected' ? 'Rejected' : certificateStatus === 'expired' ? 'Expired' : certificateStatus === 'pending' ? 'Pending review' : 'Not uploaded'
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">

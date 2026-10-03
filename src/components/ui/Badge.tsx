@@ -21,12 +21,13 @@ export function Badge({ children, variant = 'default', className }: { children: 
   )
 }
 
-export function CertificateBadge({ status }: { status: 'verified' | 'pending' | 'rejected' | 'expired' }) {
+export function CertificateBadge({ status }: { status: 'verified' | 'pending' | 'rejected' | 'expired' | 'not_uploaded' }) {
   const map = {
     verified: { variant: 'verified' as const, label: '✓ Verified' },
-    pending: { variant: 'pending' as const, label: 'Not uploaded' },
+    pending: { variant: 'pending' as const, label: 'Pending review' },
     rejected: { variant: 'danger' as const, label: '✗ Rejected' },
     expired: { variant: 'warning' as const, label: '⚠ Expired' },
+    not_uploaded: { variant: 'default' as const, label: 'Not uploaded' },
   }
   const { variant, label } = map[status]
   return <Badge variant={variant}>{label}</Badge>

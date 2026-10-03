@@ -2,35 +2,42 @@ import { useEffect, useState } from 'react'
 import { MapView, LocationCard } from '@/components/common/MapView'
 import { useAuth } from '@/context/AppContext'
 import api from '@/services/api'
-import { geocodeAddress, getCurrentLocation, DEFAULT_LOCATION } from '@/utils/locationService'
+import { DEFAULT_LOCATION, isValidCoordinates } from '@/utils/locationService'
 import type { FarmerMarker } from '@/types'
 
 export default function FarmerDelivery() {
   const { userId } = useAuth()
   const [nearbyAgents, setNearbyAgents] = useState<FarmerMarker[]>([])
   const [center, setCenter] = useState(DEFAULT_LOCATION)
+  const [farmerLocation, setFarmerLocation] = useState<{ lat: number; lng: number } | undefined>()
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    if (!userId) return
+    api.get(`/users/${userId}`).then((response) => {
+      const user = response.data.user
+      const location = { lat: Number(user.lat), lng: Number(user.lng) }
+      if (user.lat != null && user.lng != null && isValidCoordinates(location)) {
+        setFarmerLocation(location)
+        setCenter(location)
+      } else {
+        setFarmerLocation(undefined)
+      }
+    }).catch(() => setFarmerLocation(undefined))
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId) return
     let active = true
     const loadAgents = async () => {
       try {
-        const location = await getCurrentLocation()
-        if (!active) return
-        setCenter(location)
-        const response = await api.get('/admin/users')
-        const agentUsers = (response.data.users || []).filter((user: any) => user.role === 'delivery')
-        const agents = (await Promise.all(agentUsers.map(async (user: any) => {
-          const coordinates = user.lat != null && user.lng != null ? { lat: Number(user.lat), lng: Number(user.lng) } : await geocodeAddress([
-            user.address,
-            user.city,
-            user.state,
-            user.pincode,
-            'India',
-          ].filter(Boolean).join(', '))
-          if (!coordinates) return null
+        const response = await api.get('/locations/delivery')
+        const agentUsers = response.data.agents || []
+        const agents = agentUsers.filter((user: any) => user.lat != null && user.lng != null && isValidCoordinates({ lat: Number(user.lat), lng: Number(user.lng) }))
+          .map((user: any) => {
+          const coordinates = { lat: Number(user.lat), lng: Number(user.lng) }
           return { id: String(user.id), name: user.name, ...coordinates, rating: 0, verified: user.accountStatus !== 'suspended', phone: user.phone, deliveryStatus: user.availabilityStatus === 'unavailable' ? 'Unavailable' : 'Available' }
-        }))).filter(Boolean) as FarmerMarker[]
+        }) as FarmerMarker[]
         if (active) setNearbyAgents(agents)
       } catch {
         if (active) setNearbyAgents([])
@@ -62,7 +69,7 @@ export default function FarmerDelivery() {
         <div className="rounded-2xl border border-border bg-surface p-6 text-center text-sm text-muted">No delivery partners with a shared location were found.</div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {nearbyAgents.map((agent) => <LocationCard key={agent.id} marker={agent} origin={center} />)}
+          {nearbyAgents.map((agent) => <LocationCard key={agent.id} marker={agent} origin={farmerLocation} />)}
         </div>
       )}
     </div>

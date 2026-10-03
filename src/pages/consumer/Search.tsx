@@ -10,7 +10,8 @@ import { EmptyState } from '@/components/ui/Modal'
 import { cn } from '@/utils/cn'
 import api from '@/services/api'
 import { normalizeProducts } from '@/utils/productService'
-import { DEFAULT_LOCATION, getCurrentLocation, getDistanceKm } from '@/utils/locationService'
+import { requestCurrentLocation, getDistanceKm } from '@/utils/locationService'
+import type { Coordinates } from '@/utils/locationService'
 
 export default function ConsumerSearch() {
   const { t } = useTranslation()
@@ -20,7 +21,7 @@ export default function ConsumerSearch() {
   const [filters, setFilters] = useState({ verified: false, available: false, nearby: false })
   const [products, setProducts] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
-  const [location, setLocation] = useState(DEFAULT_LOCATION)
+  const [location, setLocation] = useState<Coordinates | null>(null)
 
   const categoryFilter = params.get('category') || 'None'
 
@@ -30,7 +31,7 @@ export default function ConsumerSearch() {
       try {
         const [response, currentLocation] = await Promise.all([
           api.get('/products', { params: { includeUnavailable: true } }),
-          getCurrentLocation(),
+          requestCurrentLocation().catch(() => null),
         ])
         setProducts(normalizeProducts(response.data.products || []))
         setLocation(currentLocation)
@@ -62,7 +63,9 @@ export default function ConsumerSearch() {
   if (filters.verified) filteredProducts = filteredProducts.filter((p) => p.verified)
   if (filters.available) filteredProducts = filteredProducts.filter((p) => p.available)
   if (filters.nearby) {
-    filteredProducts = filteredProducts.filter((p) => p.farmerLat != null && p.farmerLng != null && getDistanceKm(location.lat, location.lng, p.farmerLat, p.farmerLng) <= 50)
+    filteredProducts = location
+      ? filteredProducts.filter((p) => p.farmerLat != null && p.farmerLng != null && getDistanceKm(location.lat, location.lng, p.farmerLat, p.farmerLng) <= 50)
+      : []
   }
 
   return (

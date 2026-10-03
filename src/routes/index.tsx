@@ -14,7 +14,6 @@ import FarmerMessages from '@/pages/farmer/Messages'
 import FarmerProfile from '@/pages/farmer/ProfileHub'
 import FarmerProfileEdit from '@/pages/shared/ProfilePage'
 import FarmerAddress from '@/pages/farmer/Address'
-import FarmerCertification from '@/pages/farmer/Certification'
 import FarmerAnalytics from '@/pages/farmer/Analytics'
 
 /* Consumer */
@@ -84,7 +83,7 @@ export const router = createBrowserRouter([
       { path: 'profile', element: <FarmerProfile /> },
       { path: 'profile/edit', element: <FarmerProfileEdit role="farmer" /> },
       { path: 'profile/address', element: <FarmerAddress /> },
-      { path: 'profile/certification', element: <FarmerCertification /> },
+      { path: 'profile/certification', element: <Navigate to="/farmer/certificate" replace /> },
       { path: 'help', element: <HelpSupport role="farmer" /> },
     ],
   },

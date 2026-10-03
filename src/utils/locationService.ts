@@ -27,14 +27,18 @@ export function getDistanceKm(lat1: number, lng1: number, lat2: number, lng2: nu
 }
 
 export function getCurrentLocation(): Promise<Coordinates> {
+  return requestCurrentLocation().catch(() => DEFAULT_LOCATION)
+}
+
+export function requestCurrentLocation(): Promise<Coordinates> {
   if (typeof navigator === 'undefined' || !navigator.geolocation) {
-    return Promise.resolve(DEFAULT_LOCATION)
+    return Promise.reject(new Error('Geolocation is not available in this browser.'))
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     navigator.geolocation.getCurrentPosition(
       ({ coords }) => resolve({ lat: coords.latitude, lng: coords.longitude }),
-      () => resolve(DEFAULT_LOCATION),
+      (error) => reject(error),
       {
         enableHighAccuracy: true,
         timeout: 5000,

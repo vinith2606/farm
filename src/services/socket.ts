@@ -5,14 +5,10 @@ const SOCKET_BASE = API_BASE_URL.replace(/\/api$/, '')
 
 let socket: Socket | null = null
 
-export function initSocket(userId?: string | number) {
+export function initSocket(_userId?: string | number) {
   if (socket) return socket
-  socket = io(SOCKET_BASE, { autoConnect: false })
-  if (userId) {
-    socket.on('connect', () => {
-      socket?.emit('join', String(userId))
-    })
-  }
+  const token = localStorage.getItem('farmdirect_token')
+  socket = io(SOCKET_BASE, { autoConnect: false, auth: { token } })
   socket.connect()
   return socket
 }

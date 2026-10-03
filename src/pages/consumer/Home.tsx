@@ -10,20 +10,24 @@ import { Badge } from '@/components/ui/Badge'
 import { EmptyState } from '@/components/ui/Modal'
 import api from '@/services/api'
 import { normalizeProducts } from '@/utils/productService'
-import { getCurrentLocation, getDistanceKm, DEFAULT_LOCATION } from '@/utils/locationService'
+import { requestCurrentLocation, getDistanceKm } from '@/utils/locationService'
+import type { Coordinates } from '@/utils/locationService'
 
 export default function ConsumerHome() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [products, setProducts] = useState<any[]>([])
   const [query, setQuery] = useState('')
-  const [location, setLocation] = useState(DEFAULT_LOCATION)
+  const [location, setLocation] = useState<Coordinates | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [response, currentLocation] = await Promise.all([api.get('/products'), getCurrentLocation()])
+        const [response, currentLocation] = await Promise.all([
+          api.get('/products'),
+          requestCurrentLocation().catch(() => null),
+        ])
         const rawProducts = response.data.products || []
         setProducts(normalizeProducts(rawProducts).map((product: any, index: number) => ({
           ...product,
@@ -47,12 +51,12 @@ export default function ConsumerHome() {
     return Array.from(counts.entries()).map(([name, count]) => ({ name, count }))
   }, [products])
 
-  const nearbyProducts = useMemo(() => products
+  const nearbyProducts = useMemo(() => location ? products
     .filter((product) => product.farmerLat != null && product.farmerLng != null)
     .map((product) => ({ ...product, distance: getDistanceKm(location.lat, location.lng, product.farmerLat, product.farmerLng) }))
     .filter((product) => product.distance <= 50)
     .sort((first, second) => first.distance - second.distance)
-    .slice(0, 4), [location, products])
+    .slice(0, 4) : [], [location, products])
 
   const allFarmers = useMemo(() => {
     const farmers = new Map<string, any>()

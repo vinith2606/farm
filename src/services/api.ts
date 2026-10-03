@@ -27,6 +27,13 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (error) => {
+    const authRoute = /\/auth\/(login|register)\/?$/.test(error.config?.url || '')
+    if (error.response?.status === 401 && !authRoute && typeof window !== 'undefined') {
+      for (const key of ['farmdirect_token', 'farmdirect_role', 'farmdirect_user', 'farmdirect_user_id', 'farmdirect_profile']) {
+        localStorage.removeItem(key)
+      }
+      if (window.location.pathname !== '/') window.location.assign('/')
+    }
     console.warn('[API]', error.message)
     return Promise.reject(error)
   }

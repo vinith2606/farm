@@ -46,7 +46,7 @@ export default function ConsumerProfile() {
     try {
       const response = await api.put(`/users/${userId}/profile`, { name, phone, email, avatar })
       const user = response.data.user
-      updateProfile(user.name, { id: String(user.id), email: user.email || '', phone: user.phone || '', avatar: user.avatar || '', location: user.lat && user.lng ? { lat: user.lat, lng: user.lng, address: user.address || '', city: user.city || '' } : undefined })
+      updateProfile(user.name, { id: String(user.id), email: user.email || '', phone: user.phone || '', avatar: user.avatar || '', location: user.lat != null && user.lng != null ? { lat: user.lat, lng: user.lng, address: user.address || '', city: user.city || '' } : undefined })
       toast('Profile saved successfully.', 'success')
       navigate('/consumer/profile')
     } catch (saveError: any) { setError(saveError?.response?.data?.message || 'Unable to save profile right now.') } finally { setSaving(false) }

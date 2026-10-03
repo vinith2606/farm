@@ -28,7 +28,7 @@ export default function ConsumerCart() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const location = useLocation()
-  const { items, wishlist, removeItem, updateQuantity, total, clearCart } = useCart()
+  const { items, removeItem, updateQuantity, total, clearCart } = useCart()
   const { userId, userName, userLocation } = useAuth()
   const { toast } = useToast()
   const [addressLine, setAddressLine] = useState(userLocation?.address || '')
@@ -40,7 +40,7 @@ export default function ConsumerCart() {
   const [loading, setLoading] = useState(false)
   const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([])
   const [selectedAddressId, setSelectedAddressId] = useState<number | null>(null)
-  const [deliveryCoordinates, setDeliveryCoordinates] = useState({ lat: userLocation?.lat || null, lng: userLocation?.lng || null })
+  const [deliveryCoordinates, setDeliveryCoordinates] = useState({ lat: userLocation?.lat ?? null, lng: userLocation?.lng ?? null })
 
   const hasSavedAddress = savedAddresses.length > 0 && selectedAddressId !== null
 
@@ -76,7 +76,7 @@ export default function ConsumerCart() {
     setPinCode(address.pincode || '')
   }
 
-  if (items.length === 0 && wishlist.length === 0) {
+  if (items.length === 0) {
     return (
       <EmptyState
         icon={ShoppingCart}
@@ -87,8 +87,8 @@ export default function ConsumerCart() {
     )
   }
 
-  const farmerDistance = items.length > 0 && items[0].product.farmerLat != null && items[0].product.farmerLng != null && userLocation?.lat != null && userLocation?.lng != null
-    ? getDistanceKm(userLocation.lat, userLocation.lng, items[0].product.farmerLat, items[0].product.farmerLng)
+  const farmerDistance = items.length > 0 && items[0].product.farmerLat != null && items[0].product.farmerLng != null && deliveryCoordinates.lat != null && deliveryCoordinates.lng != null
+    ? getDistanceKm(deliveryCoordinates.lat, deliveryCoordinates.lng, items[0].product.farmerLat, items[0].product.farmerLng)
     : 0
 
   const delivery = total >= 499 ? 0 : farmerDistance <= 5 ? 25 : farmerDistance <= 15 ? 45 : farmerDistance <= 30 ? 70 : 95

@@ -7,7 +7,7 @@ import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { StarRating } from '@/components/cards/RatingCard'
-import { buildDirectionsUrl, DEFAULT_LOCATION, isValidCoordinates, getCurrentLocation } from '@/utils/locationService'
+import { buildDirectionsUrl, DEFAULT_LOCATION, isValidCoordinates, requestCurrentLocation } from '@/utils/locationService'
 
 interface MapViewProps {
   markers?: FarmerMarker[]
@@ -65,10 +65,17 @@ export function LocationCard({ marker, origin }: { marker: FarmerMarker; origin?
 
   const handleNavigate = () => {
     const destination = { lat: marker.lat, lng: marker.lng }
-    getCurrentLocation().then((currentLocation) => {
-      const directionsUrl = buildDirectionsUrl(origin || currentLocation || DEFAULT_LOCATION, destination)
-      window.open(directionsUrl, '_blank', 'noopener,noreferrer')
-    })
+    const navigationWindow = window.open('about:blank', '_blank')
+    if (!navigationWindow) return
+    navigationWindow.opener = null
+
+    const openDirections = async () => {
+      const currentLocation = origin || await requestCurrentLocation().catch(() => null)
+      navigationWindow.location.href = currentLocation
+        ? buildDirectionsUrl(currentLocation, destination)
+        : `https://www.openstreetmap.org/?mlat=${destination.lat}&mlon=${destination.lng}#map=15/${destination.lat}/${destination.lng}`
+    }
+    void openDirections()
   }
 
   return (

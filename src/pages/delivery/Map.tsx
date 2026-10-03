@@ -8,25 +8,28 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/Modal'
 import api from '@/services/api'
 import { normalizeOrders } from '@/utils/orderService'
-import { buildDirectionsUrl, DEFAULT_LOCATION, getCurrentLocation, getRouteDurationMinutes, isValidCoordinates } from '@/utils/locationService'
+import { buildDirectionsUrl, DEFAULT_LOCATION, geocodeAddress, getRouteDurationMinutes, isValidCoordinates, requestCurrentLocation } from '@/utils/locationService'
+import type { Coordinates } from '@/utils/locationService'
 
 export default function DeliveryMap() {
   const { t } = useTranslation()
   const [params] = useSearchParams()
   const [order, setOrder] = useState<any>(null)
-  const [target, setTarget] = useState(DEFAULT_LOCATION)
-  const [origin, setOrigin] = useState(DEFAULT_LOCATION)
+  const [target, setTarget] = useState<Coordinates | null>(null)
+  const [origin, setOrigin] = useState<Coordinates | null>(null)
   const [etaMinutes, setEtaMinutes] = useState<number | null>(null)
   const address = params.get('address') || ''
 
   useEffect(() => {
     const orderId = params.get('orderId')
     const userId = localStorage.getItem('farmdirect_user_id')
-    const latitude = Number(params.get('lat'))
-    const longitude = Number(params.get('lng'))
-    if (isValidCoordinates({ lat: latitude, lng: longitude })) setTarget({ lat: latitude, lng: longitude })
+    const latitudeParam = params.get('lat')
+    const longitudeParam = params.get('lng')
+    const latitude = Number(latitudeParam)
+    const longitude = Number(longitudeParam)
+    if (latitudeParam && longitudeParam && isValidCoordinates({ lat: latitude, lng: longitude })) setTarget({ lat: latitude, lng: longitude })
 
-    getCurrentLocation().then(setOrigin)
+    requestCurrentLocation().then(setOrigin).catch(() => setOrigin(null))
 
     if (!orderId || !userId) return
     api.get('/orders', { params: { userId, role: 'delivery' } }).then(async (response) => {
@@ -35,9 +38,11 @@ export default function DeliveryMap() {
 
       if (!next) return
 
-      const orderLatitude = Number(params.get('lat'))
-      const orderLongitude = Number(params.get('lng'))
-      const hasExplicitTarget = isValidCoordinates({ lat: orderLatitude, lng: orderLongitude })
+      const orderLatitudeParam = params.get('lat')
+      const orderLongitudeParam = params.get('lng')
+      const orderLatitude = Number(orderLatitudeParam)
+      const orderLongitude = Number(orderLongitudeParam)
+      const hasExplicitTarget = Boolean(orderLatitudeParam && orderLongitudeParam && isValidCoordinates({ lat: orderLatitude, lng: orderLongitude }))
       const pickupCoordinates = next.farmerLat != null && next.farmerLng != null ? { lat: next.farmerLat, lng: next.farmerLng } : null
       const deliveryCoordinates = next.consumerLat != null && next.consumerLng != null ? { lat: next.consumerLat, lng: next.consumerLng } : null
 
@@ -47,17 +52,13 @@ export default function DeliveryMap() {
           : (pickupCoordinates && !deliveryCoordinates ? pickupCoordinates : deliveryCoordinates)
 
         if (selectedTarget) setTarget(selectedTarget)
-        else if (address) {
-          const geocodeResponse = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(address)}`)
-          const results = await geocodeResponse.json()
-          if (results[0]) setTarget({ lat: Number(results[0].lat), lng: Number(results[0].lon) })
-        }
+        else if (address) setTarget(await geocodeAddress(address))
       }
     }).catch(() => setOrder(null))
   }, [params, address])
 
   useEffect(() => {
-    if (!order) {
+    if (!order || !origin) {
       setEtaMinutes(null)
       return
     }
@@ -94,15 +95,19 @@ export default function DeliveryMap() {
   const routeLabel = isPickupRoute ? order?.farmerName : order?.consumerName
 
   const handleNavigate = () => {
-    if (!order) return
-    const directionsUrl = buildDirectionsUrl(origin, routeDestination)
-    window.open(directionsUrl, '_blank', 'noopener,noreferrer')
+    if (!order || !routeDestination) return
+    const navigationWindow = window.open('about:blank', '_blank')
+    if (!navigationWindow) return
+    navigationWindow.opener = null
+    navigationWindow.location.href = origin
+      ? buildDirectionsUrl(origin, routeDestination)
+      : `https://www.openstreetmap.org/?mlat=${routeDestination.lat}&mlon=${routeDestination.lng}#map=15/${routeDestination.lat}/${routeDestination.lng}`
   }
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold font-[family-name:var(--font-display)]">{t('delivery.mapView')}</h1>
-      <MapView markers={order ? [{ id: 'target', name: routeLabel || order.consumerName, lat: routeDestination.lat, lng: routeDestination.lng, rating: 0, verified: false }] : []} showRoute={Boolean(order)} center={routeDestination} height="400px" />
+      <MapView markers={order && routeDestination ? [{ id: 'target', name: routeLabel || order.consumerName, lat: routeDestination.lat, lng: routeDestination.lng, rating: 0, verified: false }] : []} showRoute={Boolean(order && routeDestination)} center={routeDestination || target || DEFAULT_LOCATION} height="400px" />
       {!order ? (
         <Card><EmptyState icon={Package} title={t('common.noData')} description="Assign a delivery order to see routes and ETA." /></Card>
       ) : (
@@ -118,10 +123,10 @@ export default function DeliveryMap() {
             </Card>
             <Card>
               <div className="flex items-center gap-3 mb-2"><Clock className="w-5 h-5 text-accent" /><h3 className="font-semibold">{t('common.eta')}</h3></div>
-              <p className="text-2xl font-bold text-primary">{etaMinutes ? `${etaMinutes} min` : 'Calculating...'}</p>
+              <p className="text-2xl font-bold text-primary">{etaMinutes ? `${etaMinutes} min` : origin ? 'Calculating...' : 'Location unavailable'}</p>
             </Card>
           </div>
-          <Button size="lg" className="w-full sm:w-auto" onClick={handleNavigate}><Navigation className="w-5 h-5" />{t('common.navigate')}</Button>
+          <Button size="lg" className="w-full sm:w-auto" onClick={handleNavigate} disabled={!routeDestination}><Navigation className="w-5 h-5" />{t('common.navigate')}</Button>
         </>
       )}
     </div>
